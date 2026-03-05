@@ -33,8 +33,8 @@ const PROVIDERS = [
   { id: 'youtube', label: 'YouTube' },
   { id: 'freesound', label: 'FreeSound' },
   { id: 'archive', label: 'Archive.org' },
-  { id: 'soundcloud', label: 'SoundCloud' }
-  // { id: 'samplette', label: 'Samplette' } // hidden pending API access
+  { id: 'soundcloud', label: 'SoundCloud' },
+  { id: 'samplette', label: 'Samplette' }
 ];
 const PROVIDER_TAGS = {
   youtube: '[YT]',
@@ -80,12 +80,18 @@ let shiftHeld = false;
 
 let menuState = createMenuState();
 let menuStack = createMenuStack();
+let rootMenu = null;
 
 let tickCounter = 0;
 let spinnerTick = 0;
 let spinnerFrame = 0;
 let needsRedraw = true;
 let pendingKnobAction = null;
+let scrollOffset = 0;
+let scrollTick = 0;
+const FOOTER_MAX_CHARS = 21;
+const FOOTER_MAX_CHARS_WITH_TIME = 15;
+const SCROLL_PAD = '   ';
 
 function normalizeProvider(value) {
   const raw = String(value || '').trim().toLowerCase();
@@ -377,7 +383,32 @@ function sampletteShuffle() {
 
 function sampletteNextTrack() {
   host_module_set_param('next_track_step', 'trigger');
+  scrollOffset = 0;
   statusMessage = 'Next track...';
+  needsRedraw = true;
+}
+
+function refreshFiltersMenu() {
+  const current = menuStack.current();
+  if (!current || current.title !== 'Filters') return;
+  const genreLabel = sampletteFilter.genre.length > 0 ? sampletteFilter.genre[0] : 'All';
+  const keyLabel = sampletteFilter.key.length > 0 ? sampletteFilter.key[0] : 'All';
+  const tempoEntry = SAMPLETTE_TEMPOS.find(
+    (t) => t.min === sampletteFilter.tempo_min && t.max === sampletteFilter.tempo_max
+  );
+  const tempoLabel = tempoEntry ? tempoEntry.label : 'All';
+
+  current.items = [
+    createAction(`Genre: ${genreLabel}`, () => openSampletteGenreMenu()),
+    createAction(`Key: ${keyLabel}`, () => openSampletteKeyMenu()),
+    createAction(`Tempo: ${tempoLabel}`, () => openSampletteTempoMenu()),
+    createAction('[Apply Filters]', () => {
+      while (menuStack.depth() > 1) menuStack.pop();
+      menuState.selectedIndex = 0;
+      sampletteShuffle();
+    })
+  ];
+  clampSelectedIndex();
   needsRedraw = true;
 }
 
@@ -389,7 +420,7 @@ function openSampletteGenreMenu() {
       sampletteFilter.genre = (g === 'All') ? [] : [g];
       menuStack.pop();
       menuState.selectedIndex = 0;
-      sampletteApplyFilter();
+      refreshFiltersMenu();
     });
   });
   menuStack.push({ title: 'Genre', items, selectedIndex: 0 });
@@ -405,7 +436,7 @@ function openSampletteKeyMenu() {
       sampletteFilter.key = (k === 'All') ? [] : [k];
       menuStack.pop();
       menuState.selectedIndex = 0;
-      sampletteApplyFilter();
+      refreshFiltersMenu();
     });
   });
   menuStack.push({ title: 'Key', items, selectedIndex: 0 });
@@ -422,7 +453,7 @@ function openSampletteTempoMenu() {
       sampletteFilter.tempo_max = t.max;
       menuStack.pop();
       menuState.selectedIndex = 0;
-      sampletteApplyFilter();
+      refreshFiltersMenu();
     });
   });
   menuStack.push({ title: 'Tempo', items, selectedIndex: 0 });
@@ -441,23 +472,71 @@ function openSampletteFiltersMenu() {
   const items = [
     createAction(`Genre: ${genreLabel}`, () => openSampletteGenreMenu()),
     createAction(`Key: ${keyLabel}`, () => openSampletteKeyMenu()),
-    createAction(`Tempo: ${tempoLabel}`, () => openSampletteTempoMenu())
+    createAction(`Tempo: ${tempoLabel}`, () => openSampletteTempoMenu()),
+    createAction('[Apply Filters]', () => {
+      while (menuStack.depth() > 1) menuStack.pop();
+      menuState.selectedIndex = 0;
+      sampletteShuffle();
+    })
   ];
   menuStack.push({ title: 'Filters', items, selectedIndex: 0 });
   menuState.selectedIndex = 0;
   needsRedraw = true;
 }
 
+function getCurrentlyPlayingResult() {
+  if (searchProvider === 'samplette') {
+    const idx = parseInt(host_module_get_param('samplette_result_index') || '0', 10);
+    if (idx >= 0 && idx < results.length) return results[idx];
+    return null;
+  }
+  const currentUrl = host_module_get_param('stream_url') || '';
+  if (!currentUrl) return null;
+  return results.find((r) => r.url === currentUrl) || null;
+}
+
 function sampletteNowPlayingLabel() {
-  const idx = parseInt(host_module_get_param('samplette_result_index') || '0', 10);
-  if (idx < 0 || idx >= results.length) return null;
-  const r = results[idx];
+  const r = getCurrentlyPlayingResult();
   if (!r) return null;
   const parts = [cleanLabel(r.title, 20)];
   if (r.meta_key) parts.push(`${r.meta_key}${r.meta_scale ? ' ' + r.meta_scale : ''}`);
   if (r.meta_tempo) parts.push(`${r.meta_tempo}bpm`);
   if (r.meta_genre) parts.push(cleanLabel(r.meta_genre, 14));
   return parts.join(' | ');
+}
+
+function openNowPlayingMenu() {
+  const r = getCurrentlyPlayingResult();
+  if (!r) {
+    menuStack.push({
+      title: 'Now Playing',
+      items: [createAction('(Nothing playing)', () => {})],
+      selectedIndex: 0
+    });
+    menuState.selectedIndex = 0;
+    needsRedraw = true;
+    return;
+  }
+
+  const noop = () => {};
+  const items = [];
+  items.push(createAction(r.title || '(untitled)', noop));
+  if (r.channel) items.push(createAction(`By: ${r.channel}`, noop));
+  if (r.duration) items.push(createAction(`Duration: ${r.duration}`, noop));
+  items.push(createAction(`Source: ${providerLabel(r.provider)}`, noop));
+  if (r.meta_key) {
+    const keyStr = r.meta_scale ? `${r.meta_key} ${r.meta_scale}` : r.meta_key;
+    items.push(createAction(`Key: ${keyStr}`, noop));
+  }
+  if (r.meta_tempo) items.push(createAction(`Tempo: ${r.meta_tempo} BPM`, noop));
+  if (r.meta_genre) items.push(createAction(`Genre: ${r.meta_genre}`, noop));
+  if (r.meta_style) items.push(createAction(`Style: ${r.meta_style}`, noop));
+  if (r.meta_country) items.push(createAction(`Country: ${r.meta_country}`, noop));
+  if (r.meta_year) items.push(createAction(`Year: ${r.meta_year}`, noop));
+
+  menuStack.push({ title: 'Now Playing', items, selectedIndex: 0 });
+  menuState.selectedIndex = 0;
+  needsRedraw = true;
 }
 
 function openSampletteHistoryMenu() {
@@ -502,32 +581,59 @@ function openSampletteHistoryMenu() {
 }
 
 function playPauseLabel() {
+  if (streamStatus === 'loading' || streamStatus === 'buffering') return '[Cancel]';
   if (streamStatus === 'paused') return '[Play]';
   if (streamStatus === 'streaming') return '[Pause]';
+  if ((streamStatus === 'stopped' || streamStatus === 'eof') && results.length > 0) return '[Play]';
   return '[Play/Pause]';
 }
 
 function togglePlayPause() {
+  if (streamStatus === 'loading' || streamStatus === 'buffering') {
+    host_module_set_param('stop_step', 'trigger');
+    statusMessage = 'Cancelled';
+    needsRedraw = true;
+    return;
+  }
+  if (streamStatus === 'stopped' || streamStatus === 'eof') {
+    if (results.length > 0) {
+      const row = results[0];
+      if (row && row.url) {
+        const provider = normalizeProvider(row.provider || searchProvider);
+        if (searchProvider === 'samplette') {
+          host_module_set_param('samplette_auto_advance', '1');
+          host_module_set_param('samplette_result_index', '0');
+        }
+        host_module_set_param('stream_provider', provider);
+        host_module_set_param('stream_url', row.url);
+        statusMessage = 'Loading...';
+        needsRedraw = true;
+        return;
+      }
+    }
+  }
   host_module_set_param('play_pause_step', 'trigger');
   statusMessage = streamStatus === 'paused' ? 'Resuming...' : 'Pausing...';
   needsRedraw = true;
 }
 
+function isPlaying() {
+  return streamStatus === 'streaming' || streamStatus === 'paused';
+}
+
 function buildSampletteRootItems() {
   const items = [
-    createAction('[Shuffle]', () => sampletteShuffle()),
-    createAction('[Next Track]', () => sampletteNextTrack()),
     createAction(playPauseLabel(), () => togglePlayPause()),
-    createAction('[<< 15s]', () => { host_module_set_param('rewind_15_step', 'trigger'); statusMessage = 'Rewind 15s'; needsRedraw = true; }),
-    createAction('[15s >>]', () => { host_module_set_param('forward_15_step', 'trigger'); statusMessage = 'Forward 15s'; needsRedraw = true; }),
-    createAction('[Filters...]', () => openSampletteFiltersMenu()),
-    createAction('[History...]', () => openSampletteHistoryMenu())
+    createAction('[Shuffle]', () => sampletteShuffle())
   ];
-
-  const nowPlaying = sampletteNowPlayingLabel();
-  if (nowPlaying) {
-    items.push(createAction(nowPlaying, () => {}));
+  if (isPlaying()) {
+    items.push(createAction('[Next Track]', () => sampletteNextTrack()));
+    items.push(createAction('[<< 15s]', () => { host_module_set_param('rewind_15_step', 'trigger'); statusMessage = 'Rewind 15s'; needsRedraw = true; }));
+    items.push(createAction('[15s >>]', () => { host_module_set_param('forward_15_step', 'trigger'); statusMessage = 'Forward 15s'; needsRedraw = true; }));
+    items.push(createAction('[Now Playing...]', () => openNowPlayingMenu()));
   }
+  items.push(createAction('[Filters...]', () => openSampletteFiltersMenu()));
+  items.push(createAction('[History...]', () => openSampletteHistoryMenu()));
 
   items.push(createAction('[Change Provider...]', () => {
     clearSearchState();
@@ -542,18 +648,25 @@ function buildRootItems() {
     return buildSampletteRootItems();
   }
 
-  const items = [
-    createAction(playPauseLabel(), () => togglePlayPause()),
-    createAction('[<< 15s]', () => { host_module_set_param('rewind_15_step', 'trigger'); statusMessage = 'Rewind 15s'; needsRedraw = true; }),
-    createAction('[15s >>]', () => { host_module_set_param('forward_15_step', 'trigger'); statusMessage = 'Forward 15s'; needsRedraw = true; }),
-    createAction('[New Search...]', () => {
-      clearSearchState();
-      openProviderMenu();
-    }),
-    createAction('[Previous searches]', () => {
-      openSearchHistoryMenu();
-    })
-  ];
+  const isLoading = streamStatus === 'loading' || streamStatus === 'buffering';
+  const items = [];
+  if (isPlaying()) {
+    items.push(createAction(playPauseLabel(), () => togglePlayPause()));
+    items.push(createAction('[<< 15s]', () => { host_module_set_param('rewind_15_step', 'trigger'); statusMessage = 'Rewind 15s'; needsRedraw = true; }));
+    items.push(createAction('[15s >>]', () => { host_module_set_param('forward_15_step', 'trigger'); statusMessage = 'Forward 15s'; needsRedraw = true; }));
+    items.push(createAction('[Now Playing...]', () => openNowPlayingMenu()));
+  } else if (isLoading) {
+    items.push(createAction(playPauseLabel(), () => togglePlayPause()));
+  } else if (results.length > 0) {
+    items.push(createAction(playPauseLabel(), () => togglePlayPause()));
+  }
+  items.push(createAction('[New Search...]', () => {
+    clearSearchState();
+    openProviderMenu();
+  }));
+  items.push(createAction('[Previous searches]', () => {
+    openSearchHistoryMenu();
+  }));
 
   const count = Math.min(results.length, MAX_MENU_RESULTS);
   for (let i = 0; i < count; i++) {
@@ -576,18 +689,17 @@ function buildRootItems() {
 
 function rebuildMenu() {
   const items = buildRootItems();
-  const current = menuStack.current();
-  if (!current) {
-    menuStack.push({
-      title: `Webstream ${providerTag(searchProvider)}`,
-      items,
-      selectedIndex: 0
-    });
+  const title = `Webstream ${providerTag(searchProvider)}`;
+  if (menuStack.depth() === 0) {
+    rootMenu = { title, items, selectedIndex: 0 };
+    menuStack.push(rootMenu);
     menuState.selectedIndex = 0;
-  } else {
-    current.title = `Webstream ${providerTag(searchProvider)}`;
-    current.items = items;
-    clampSelectedIndex();
+  } else if (rootMenu) {
+    rootMenu.title = title;
+    rootMenu.items = items;
+    if (menuStack.depth() === 1) {
+      clampSelectedIndex();
+    }
   }
   needsRedraw = true;
 }
@@ -599,7 +711,9 @@ function loadResults() {
     const provider = normalizeProvider(host_module_get_param(`search_result_provider_${i}`) || searchProvider);
     const title = host_module_get_param(`search_result_title_${i}`) || '';
     const url = host_module_get_param(`search_result_url_${i}`) || '';
-    const entry = { provider, title, url };
+    const channel = host_module_get_param(`search_result_channel_${i}`) || '';
+    const duration = host_module_get_param(`search_result_duration_${i}`) || '';
+    const entry = { provider, title, url, channel, duration };
     if (isSamplette) {
       entry.meta_key = host_module_get_param(`search_result_key_${i}`) || '';
       entry.meta_scale = host_module_get_param(`search_result_scale_${i}`) || '';
@@ -669,7 +783,7 @@ function refreshState() {
     else if (streamStatus === 'streaming') statusMessage = 'Playing';
     else if (streamStatus === 'eof') statusMessage = 'Ended';
     else if (streamStatus === 'stopped') statusMessage = 'Stopped';
-    needsRedraw = true;
+    rebuildMenu();
   }
 }
 
@@ -695,20 +809,50 @@ function openSearchPrompt(providerId = searchProvider) {
   });
 }
 
+function scrollText(text, maxChars) {
+  const max = maxChars || FOOTER_MAX_CHARS;
+  if (!text || text.length <= max) return text;
+  const padded = text + SCROLL_PAD;
+  const start = scrollOffset % padded.length;
+  const visible = (padded + padded).slice(start, start + max);
+  return visible;
+}
+
+function nowPlayingFooter() {
+  if (streamStatus !== 'streaming' && streamStatus !== 'paused') return null;
+  const r = getCurrentlyPlayingResult();
+  if (!r) return null;
+  if (searchProvider === 'samplette') {
+    return sampletteNowPlayingLabel();
+  }
+  const parts = [cleanLabel(r.title, 20)];
+  if (r.channel) parts.push(cleanLabel(r.channel, 14));
+  if (r.duration) parts.push(r.duration);
+  return parts.join(' | ');
+}
+
 function currentFooter() {
   if (isTextEntryActive()) return '';
   const activity = currentActivityLabel();
   if (activity) return `${activity} ${SPINNER[spinnerFrame]}`;
+  const np = nowPlayingFooter();
+  if (np) {
+    const time = host_module_get_param('playback_time') || '';
+    if (time) {
+      return { left: scrollText(np, FOOTER_MAX_CHARS_WITH_TIME), right: time };
+    }
+    return scrollText(np);
+  }
   if (statusMessage) return statusMessage;
   return 'Click:select Back:exit';
 }
 
 globalThis.init = function () {
-  searchQuery = '';
   searchProvider = normalizeProvider(host_module_get_param('search_provider') || 'youtube');
-  searchStatus = 'idle';
-  searchCount = 0;
-  streamStatus = 'stopped';
+  searchQuery = host_module_get_param('search_query') || '';
+  searchStatus = host_module_get_param('search_status') || 'idle';
+  searchCount = parseInt(host_module_get_param('search_count') || '0', 10) || 0;
+  streamStatus = host_module_get_param('stream_status') || 'stopped';
   selectedIndex = 0;
   statusMessage = 'Click: select';
   results = [];
@@ -717,13 +861,17 @@ globalThis.init = function () {
 
   menuState = createMenuState();
   menuStack = createMenuStack();
+  rootMenu = null;
   tickCounter = 0;
   spinnerTick = 0;
   spinnerFrame = 0;
   needsRedraw = true;
   pendingKnobAction = null;
 
-  host_module_set_param('search_query', '');
+  if (searchCount > 0) {
+    loadResults();
+    statusMessage = 'Ready';
+  }
   rebuildMenu();
 };
 
@@ -747,6 +895,17 @@ globalThis.tick = function () {
     }
   } else {
     spinnerTick = 0;
+  }
+
+  if (nowPlayingFooter()) {
+    scrollTick = (scrollTick + 1) % 2;
+    if (scrollTick === 0) {
+      scrollOffset++;
+      needsRedraw = true;
+    }
+  } else {
+    scrollOffset = 0;
+    scrollTick = 0;
   }
 
   if (needsRedraw) {

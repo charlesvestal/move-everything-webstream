@@ -2258,6 +2258,13 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
     if (strcmp(key, "gain") == 0) {
         return snprintf(buf, (size_t)buf_len, "%.2f", inst ? inst->gain : 1.0f);
     }
+    if (strcmp(key, "playback_time") == 0) {
+        if (!inst) return snprintf(buf, (size_t)buf_len, "0:00");
+        uint64_t total_sec = inst->play_abs / ((uint64_t)MOVE_SAMPLE_RATE * 2ULL);
+        unsigned int min = (unsigned int)(total_sec / 60);
+        unsigned int sec = (unsigned int)(total_sec % 60);
+        return snprintf(buf, (size_t)buf_len, "%u:%02u", min, sec);
+    }
     if (strcmp(key, "play_pause_step") == 0) {
         return snprintf(buf, (size_t)buf_len, "idle");
     }
