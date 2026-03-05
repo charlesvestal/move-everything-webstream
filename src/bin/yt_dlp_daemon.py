@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import http.cookiejar
 import json
 import os
 import re
@@ -610,6 +611,165 @@ def resolve_request(yt_dlp_mod, provider: str, source_url: str) -> None:
     raise RuntimeError(f"unsupported provider: {provider}")
 
 
+class SampletteSession:
+    SAMPLETTE_BASE = "https://samplette.io"
+    MAX_EXCLUDE_IDS = 200
+
+    def __init__(self):
+        self.cookie_jar = http.cookiejar.CookieJar()
+        self.opener = urllib.request.build_opener(
+            urllib.request.HTTPCookieProcessor(self.cookie_jar)
+        )
+        self.csrf_token = ""
+        self.initialized = False
+        self.exclude_ids: list = []
+
+    def _request(self, path: str, data=None, method="GET"):
+        url = f"{self.SAMPLETTE_BASE}{path}"
+        headers = {"User-Agent": "move-anything-webstream/1.0"}
+        body = None
+        if data is not None:
+            body = json.dumps(data).encode("utf-8")
+            headers["Content-Type"] = "application/json; charset=UTF-8"
+            headers["X-CSRFToken"] = self.csrf_token
+            headers["X-Requested-With"] = "XMLHttpRequest"
+            headers["Origin"] = self.SAMPLETTE_BASE
+            headers["Referer"] = f"{self.SAMPLETTE_BASE}/"
+        req = urllib.request.Request(url, data=body, headers=headers, method=method)
+        with self.opener.open(req, timeout=20) as resp:
+            return resp.read().decode("utf-8", errors="replace")
+
+    def init_session(self):
+        html = self._request("/")
+        m = re.search(r'csrf-token"\s+content="([^"]+)"', html)
+        if not m:
+            raise RuntimeError("samplette: csrf token not found")
+        self.csrf_token = m.group(1)
+        self.initialized = True
+        self.exclude_ids = []
+
+    def ensure_session(self):
+        if not self.initialized:
+            self.init_session()
+
+    def get_lov(self, endpoint: str) -> list:
+        self.ensure_session()
+        text = self._request(endpoint)
+        data = json.loads(text)
+        if isinstance(data, dict):
+            for v in data.values():
+                if isinstance(v, list):
+                    return v
+        return []
+
+    def set_filter(self, filter_json: str):
+        self.ensure_session()
+        data = json.loads(filter_json)
+        text = self._request("/filter_state", data=data, method="POST")
+        result = json.loads(text)
+        if isinstance(result, dict) and result.get("error"):
+            raise RuntimeError("samplette: filter_state returned error")
+        self.exclude_ids = []
+
+    def get_samples(self, count: int = 10):
+        self.ensure_session()
+        payload = {
+            "id": None,
+            "include-previously-seen": False,
+            "exclude": self.exclude_ids[-self.MAX_EXCLUDE_IDS:],
+            "previous-ids": [],
+            "kind": "random",
+            "count": count,
+            "repeat-between-sessions": False,
+        }
+        text = self._request("/get_sample", data=payload, method="POST")
+        data = json.loads(text)
+        if isinstance(data, dict) and data.get("error"):
+            self.initialized = False
+            self.init_session()
+            text = self._request("/get_sample", data=payload, method="POST")
+            data = json.loads(text)
+            if isinstance(data, dict) and data.get("error"):
+                raise RuntimeError("samplette: get_sample returned error after re-init")
+        if not isinstance(data, list):
+            raise RuntimeError("samplette: get_sample returned non-list")
+        for item in data:
+            sid = item.get("id")
+            if sid is not None:
+                self.exclude_ids.append(sid)
+        if len(self.exclude_ids) > self.MAX_EXCLUDE_IDS:
+            self.exclude_ids = self.exclude_ids[-self.MAX_EXCLUDE_IDS:]
+        return data
+
+
+def samplette_init(session: SampletteSession) -> None:
+    session.init_session()
+    genres = session.get_lov("/genres_lov")
+    styles = session.get_lov("/styles_lov")
+    countries = session.get_lov("/countries_lov")
+    write_fields("SAMPLETTE_OK",
+                 json.dumps(genres, ensure_ascii=False),
+                 json.dumps(styles, ensure_ascii=False),
+                 json.dumps(countries, ensure_ascii=False))
+
+
+def samplette_filter(session: SampletteSession, filter_json: str) -> None:
+    session.set_filter(filter_json)
+    write_fields("SAMPLETTE_OK")
+
+
+def samplette_search(session: SampletteSession, count_text: str) -> None:
+    try:
+        count = int(count_text)
+    except Exception:
+        count = 10
+    if count < 1:
+        count = 1
+    if count > 50:
+        count = 50
+
+    samples = session.get_samples(count)
+
+    n = 0
+    write_fields("SEARCH_BEGIN")
+    for item in samples:
+        if not isinstance(item, dict):
+            continue
+        sid = clean_field(item.get("id") or "")
+        title = clean_field(item.get("best_title") or item.get("title") or "")
+        channel = clean_field(item.get("channel") or "")
+        duration = format_duration(item.get("duration"))
+        url = clean_field(item.get("url") or "")
+
+        if not title or not url:
+            continue
+
+        if url.startswith("http://"):
+            url = "https://" + url[7:]
+
+        ab = item.get("acousticbrainz") or {}
+        disc = item.get("discogs") or {}
+
+        key = clean_field(ab.get("key") or "")
+        scale = clean_field(ab.get("scale") or "")
+        tempo = clean_field(ab.get("tempo") or "")
+        genre_arr = disc.get("genre_array") or []
+        style_arr = disc.get("style_array") or []
+        genre = clean_field(", ".join(genre_arr) if isinstance(genre_arr, list) else "")
+        style = clean_field(", ".join(style_arr) if isinstance(style_arr, list) else "")
+        country = clean_field(disc.get("country") or "")
+        year = clean_field(disc.get("year") or "")
+
+        if not sid and url:
+            sid = url
+
+        write_fields("SEARCH_ITEM", sid, title, channel, duration, url,
+                     key, scale, tempo, genre, style, country, year)
+        n += 1
+
+    write_fields("SEARCH_END", str(n))
+
+
 def parse_search_parts(parts: list):
     if len(parts) >= 4:
         provider = parts[1]
@@ -646,6 +806,8 @@ def main() -> int:
     except Exception:
         yt_dlp_mod = None
 
+    samplette = SampletteSession()
+
     write_fields("READY")
 
     for raw in sys.stdin:
@@ -664,6 +826,14 @@ def main() -> int:
             elif cmd == "RESOLVE":
                 provider, source_url = parse_resolve_parts(parts)
                 resolve_request(yt_dlp_mod, provider, source_url)
+            elif cmd == "SAMPLETTE_INIT":
+                samplette_init(samplette)
+            elif cmd == "SAMPLETTE_FILTER":
+                filter_json = "\t".join(parts[1:]) if len(parts) > 1 else "{}"
+                samplette_filter(samplette, filter_json)
+            elif cmd == "SAMPLETTE_SEARCH":
+                count_text = parts[1] if len(parts) > 1 else "10"
+                samplette_search(samplette, count_text)
             elif cmd == "QUIT":
                 write_fields("BYE")
                 break

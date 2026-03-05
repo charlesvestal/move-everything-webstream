@@ -34,12 +34,37 @@ const PROVIDERS = [
   { id: 'freesound', label: 'FreeSound' },
   { id: 'archive', label: 'Archive.org' },
   { id: 'soundcloud', label: 'SoundCloud' }
+  // { id: 'samplette', label: 'Samplette' } // hidden pending API access
 ];
 const PROVIDER_TAGS = {
   youtube: '[YT]',
   freesound: '[FS]',
   archive: '[AR]',
-  soundcloud: '[SC]'
+  soundcloud: '[SC]',
+  samplette: '[SA]'
+};
+
+const SAMPLETTE_GENRES = [
+  'All', 'Blues', 'Brass & Military', 'Classical', 'Electronic',
+  'Folk, World, & Country', 'Funk / Soul', 'Hip Hop', 'Jazz',
+  'Latin', 'Pop', 'Reggae', 'Rock', 'Stage & Screen'
+];
+const SAMPLETTE_KEYS = [
+  'All', 'C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'
+];
+const SAMPLETTE_TEMPOS = [
+  { label: 'All', min: null, max: null },
+  { label: 'Slow (60-90)', min: 60, max: 90 },
+  { label: 'Medium (90-120)', min: 90, max: 120 },
+  { label: 'Fast (120-150)', min: 120, max: 150 },
+  { label: 'Very Fast (150+)', min: 150, max: 300 }
+];
+
+let sampletteFilter = {
+  genre: [], style: [], country: [], key: [],
+  tempo_min: null, tempo_max: null,
+  year_min: null, year_max: null,
+  views_min: null, views_max: null, time_sig: []
 };
 
 let searchQuery = '';
@@ -69,6 +94,7 @@ function normalizeProvider(value) {
   if (raw === 'fs') return 'freesound';
   if (raw === 'ia' || raw === 'archiveorg' || raw === 'internetarchive') return 'archive';
   if (raw === 'sc') return 'soundcloud';
+  if (raw === 'sa') return 'samplette';
   return raw;
 }
 
@@ -317,6 +343,13 @@ function openProviderMenu() {
       menuStack.pop();
     }
     menuState.selectedIndex = 0;
+    if (provider.id === 'samplette') {
+      searchProvider = 'samplette';
+      host_module_set_param('search_provider', 'samplette');
+      rebuildMenu();
+      sampletteShuffle();
+      return;
+    }
     openSearchPrompt(provider.id);
   }));
 
@@ -329,8 +362,190 @@ function openProviderMenu() {
   needsRedraw = true;
 }
 
-function buildRootItems() {
+function sampletteApplyFilter() {
+  host_module_set_param('samplette_filter', JSON.stringify(sampletteFilter));
+  statusMessage = 'Filtering...';
+  needsRedraw = true;
+}
+
+function sampletteShuffle() {
+  host_module_set_param('samplette_auto_advance', '1');
+  sampletteApplyFilter();
+  statusMessage = 'Shuffling...';
+  needsRedraw = true;
+}
+
+function sampletteNextTrack() {
+  host_module_set_param('next_track_step', 'trigger');
+  statusMessage = 'Next track...';
+  needsRedraw = true;
+}
+
+function openSampletteGenreMenu() {
+  const items = SAMPLETTE_GENRES.map((g) => {
+    const current = sampletteFilter.genre.length === 0 ? 'All' : sampletteFilter.genre[0];
+    const prefix = (g === current) ? '> ' : '  ';
+    return createAction(`${prefix}${g}`, () => {
+      sampletteFilter.genre = (g === 'All') ? [] : [g];
+      menuStack.pop();
+      menuState.selectedIndex = 0;
+      sampletteApplyFilter();
+    });
+  });
+  menuStack.push({ title: 'Genre', items, selectedIndex: 0 });
+  menuState.selectedIndex = 0;
+  needsRedraw = true;
+}
+
+function openSampletteKeyMenu() {
+  const items = SAMPLETTE_KEYS.map((k) => {
+    const current = sampletteFilter.key.length === 0 ? 'All' : sampletteFilter.key[0];
+    const prefix = (k === current) ? '> ' : '  ';
+    return createAction(`${prefix}${k}`, () => {
+      sampletteFilter.key = (k === 'All') ? [] : [k];
+      menuStack.pop();
+      menuState.selectedIndex = 0;
+      sampletteApplyFilter();
+    });
+  });
+  menuStack.push({ title: 'Key', items, selectedIndex: 0 });
+  menuState.selectedIndex = 0;
+  needsRedraw = true;
+}
+
+function openSampletteTempoMenu() {
+  const items = SAMPLETTE_TEMPOS.map((t) => {
+    const isCurrent = sampletteFilter.tempo_min === t.min && sampletteFilter.tempo_max === t.max;
+    const prefix = isCurrent ? '> ' : '  ';
+    return createAction(`${prefix}${t.label}`, () => {
+      sampletteFilter.tempo_min = t.min;
+      sampletteFilter.tempo_max = t.max;
+      menuStack.pop();
+      menuState.selectedIndex = 0;
+      sampletteApplyFilter();
+    });
+  });
+  menuStack.push({ title: 'Tempo', items, selectedIndex: 0 });
+  menuState.selectedIndex = 0;
+  needsRedraw = true;
+}
+
+function openSampletteFiltersMenu() {
+  const genreLabel = sampletteFilter.genre.length > 0 ? sampletteFilter.genre[0] : 'All';
+  const keyLabel = sampletteFilter.key.length > 0 ? sampletteFilter.key[0] : 'All';
+  const tempoEntry = SAMPLETTE_TEMPOS.find(
+    (t) => t.min === sampletteFilter.tempo_min && t.max === sampletteFilter.tempo_max
+  );
+  const tempoLabel = tempoEntry ? tempoEntry.label : 'All';
+
   const items = [
+    createAction(`Genre: ${genreLabel}`, () => openSampletteGenreMenu()),
+    createAction(`Key: ${keyLabel}`, () => openSampletteKeyMenu()),
+    createAction(`Tempo: ${tempoLabel}`, () => openSampletteTempoMenu())
+  ];
+  menuStack.push({ title: 'Filters', items, selectedIndex: 0 });
+  menuState.selectedIndex = 0;
+  needsRedraw = true;
+}
+
+function sampletteNowPlayingLabel() {
+  const idx = parseInt(host_module_get_param('samplette_result_index') || '0', 10);
+  if (idx < 0 || idx >= results.length) return null;
+  const r = results[idx];
+  if (!r) return null;
+  const parts = [cleanLabel(r.title, 20)];
+  if (r.meta_key) parts.push(`${r.meta_key}${r.meta_scale ? ' ' + r.meta_scale : ''}`);
+  if (r.meta_tempo) parts.push(`${r.meta_tempo}bpm`);
+  if (r.meta_genre) parts.push(cleanLabel(r.meta_genre, 14));
+  return parts.join(' | ');
+}
+
+function openSampletteHistoryMenu() {
+  if (results.length === 0) {
+    menuStack.push({
+      title: 'History',
+      items: [createAction('(No tracks yet)', () => {})],
+      selectedIndex: 0
+    });
+    menuState.selectedIndex = 0;
+    needsRedraw = true;
+    return;
+  }
+
+  const items = [];
+  const count = Math.min(results.length, MAX_MENU_RESULTS);
+  for (let i = 0; i < count; i++) {
+    const row = results[i];
+    const title = cleanLabel(row?.title || `Result ${i + 1}`);
+    const meta = [];
+    if (row?.meta_key) meta.push(row.meta_key);
+    if (row?.meta_tempo) meta.push(`${row.meta_tempo}bpm`);
+    const suffix = meta.length > 0 ? ` [${meta.join(' ')}]` : '';
+    items.push(
+      createAction(cleanLabel(`${title}${suffix}`, 28), () => {
+        if (!row || !row.url) return;
+        host_module_set_param('samplette_auto_advance', '1');
+        host_module_set_param('samplette_result_index', String(i));
+        host_module_set_param('stream_provider', 'youtube');
+        host_module_set_param('stream_url', row.url);
+        while (menuStack.depth() > 1) menuStack.pop();
+        menuState.selectedIndex = 0;
+        statusMessage = 'Loading...';
+        needsRedraw = true;
+      })
+    );
+  }
+
+  menuStack.push({ title: 'History', items, selectedIndex: 0 });
+  menuState.selectedIndex = 0;
+  needsRedraw = true;
+}
+
+function playPauseLabel() {
+  if (streamStatus === 'paused') return '[Play]';
+  if (streamStatus === 'streaming') return '[Pause]';
+  return '[Play/Pause]';
+}
+
+function togglePlayPause() {
+  host_module_set_param('play_pause_step', 'trigger');
+  statusMessage = streamStatus === 'paused' ? 'Resuming...' : 'Pausing...';
+  needsRedraw = true;
+}
+
+function buildSampletteRootItems() {
+  const items = [
+    createAction('[Shuffle]', () => sampletteShuffle()),
+    createAction('[Next Track]', () => sampletteNextTrack()),
+    createAction(playPauseLabel(), () => togglePlayPause()),
+    createAction('[<< 15s]', () => { host_module_set_param('rewind_15_step', 'trigger'); statusMessage = 'Rewind 15s'; needsRedraw = true; }),
+    createAction('[15s >>]', () => { host_module_set_param('forward_15_step', 'trigger'); statusMessage = 'Forward 15s'; needsRedraw = true; }),
+    createAction('[Filters...]', () => openSampletteFiltersMenu()),
+    createAction('[History...]', () => openSampletteHistoryMenu())
+  ];
+
+  const nowPlaying = sampletteNowPlayingLabel();
+  if (nowPlaying) {
+    items.push(createAction(nowPlaying, () => {}));
+  }
+
+  items.push(createAction('[Change Provider...]', () => {
+    clearSearchState();
+    openProviderMenu();
+  }));
+
+  return items;
+}
+
+function buildRootItems() {
+  if (searchProvider === 'samplette') {
+    return buildSampletteRootItems();
+  }
+
+  const items = [
+    createAction(playPauseLabel(), () => togglePlayPause()),
+    createAction('[<< 15s]', () => { host_module_set_param('rewind_15_step', 'trigger'); statusMessage = 'Rewind 15s'; needsRedraw = true; }),
+    createAction('[15s >>]', () => { host_module_set_param('forward_15_step', 'trigger'); statusMessage = 'Forward 15s'; needsRedraw = true; }),
     createAction('[New Search...]', () => {
       clearSearchState();
       openProviderMenu();
@@ -379,11 +594,22 @@ function rebuildMenu() {
 
 function loadResults() {
   const out = [];
+  const isSamplette = searchProvider === 'samplette';
   for (let i = 0; i < searchCount && i < MAX_MENU_RESULTS; i++) {
     const provider = normalizeProvider(host_module_get_param(`search_result_provider_${i}`) || searchProvider);
     const title = host_module_get_param(`search_result_title_${i}`) || '';
     const url = host_module_get_param(`search_result_url_${i}`) || '';
-    out.push({ provider, title, url });
+    const entry = { provider, title, url };
+    if (isSamplette) {
+      entry.meta_key = host_module_get_param(`search_result_key_${i}`) || '';
+      entry.meta_scale = host_module_get_param(`search_result_scale_${i}`) || '';
+      entry.meta_tempo = host_module_get_param(`search_result_tempo_${i}`) || '';
+      entry.meta_genre = host_module_get_param(`search_result_genre_${i}`) || '';
+      entry.meta_style = host_module_get_param(`search_result_style_${i}`) || '';
+      entry.meta_country = host_module_get_param(`search_result_country_${i}`) || '';
+      entry.meta_year = host_module_get_param(`search_result_year_${i}`) || '';
+    }
+    out.push(entry);
   }
   results = out;
 }
@@ -405,13 +631,29 @@ function refreshState() {
     rebuildMenu();
 
     if (searchStatus === 'searching') {
-      statusMessage = `Searching ${providerTag(searchProvider)}...`;
+      statusMessage = searchProvider === 'samplette' ? 'Finding tracks...' : `Searching ${providerTag(searchProvider)}...`;
     } else if (searchStatus === 'queued') {
       statusMessage = 'Search queued...';
     } else if (searchStatus === 'done') {
-      statusMessage = `${searchCount} results`;
+      if (searchProvider === 'samplette' && searchCount > 0 && prevSearchStatus !== 'done') {
+        /* Auto-play first result */
+        const r = results[0];
+        if (r && r.url) {
+          host_module_set_param('samplette_auto_advance', '1');
+          host_module_set_param('samplette_result_index', '0');
+          host_module_set_param('stream_provider', 'youtube');
+          host_module_set_param('stream_url', r.url);
+          statusMessage = 'Loading...';
+        } else {
+          statusMessage = 'Ready';
+        }
+      } else if (searchProvider === 'samplette') {
+        statusMessage = 'Ready';
+      } else {
+        statusMessage = `${searchCount} results`;
+      }
     } else if (searchStatus === 'no_results') {
-      statusMessage = 'No results';
+      statusMessage = searchProvider === 'samplette' ? 'No tracks found' : 'No results';
     } else if (searchStatus === 'error') {
       statusMessage = 'Search failed';
     } else if (searchStatus === 'busy') {

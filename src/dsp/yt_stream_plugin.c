@@ -44,6 +44,7 @@ static void* search_thread_main(void *arg);
 static void* resolve_thread_main(void *arg);
 static void* warmup_thread_main(void *arg);
 static void* stream_reap_thread_main(void *arg);
+static void* prefetch_thread_main(void *arg);
 
 typedef struct {
     FILE *pipe;
@@ -57,6 +58,13 @@ typedef struct {
     char channel[SEARCH_TEXT_MAX];
     char duration[24];
     char url[SEARCH_URL_MAX];
+    char meta_key[8];
+    char meta_scale[12];
+    char meta_tempo[12];
+    char meta_genre[SEARCH_TEXT_MAX];
+    char meta_style[SEARCH_TEXT_MAX];
+    char meta_country[48];
+    char meta_year[8];
 } search_result_t;
 
 typedef struct {
@@ -117,6 +125,22 @@ typedef struct {
     char resolve_error[256];
 
     float gain;
+
+    int samplette_result_index;
+    bool samplette_auto_advance;
+    int next_track_step;
+    uint64_t last_next_track_ms;
+    char samplette_pending_filter[2048];
+
+    pthread_mutex_t prefetch_mutex;
+    pthread_t prefetch_thread;
+    bool prefetch_thread_valid;
+    bool prefetch_thread_running;
+    char prefetch_source_url[STREAM_URL_MAX];
+    char prefetch_media_url[STREAM_URL_MAX];
+    char prefetch_user_agent[HTTP_HEADER_MAX];
+    char prefetch_referer[HTTP_HEADER_MAX];
+    bool prefetch_ready;
 
     pthread_mutex_t search_mutex;
     pthread_t search_thread;
@@ -324,10 +348,24 @@ static int ensure_daemon_started(yt_instance_t *inst, char *err, size_t err_len)
 static void* warmup_thread_main(void *arg) {
     yt_instance_t *inst = (yt_instance_t *)arg;
     char err[256];
+    char line[DAEMON_LINE_MAX];
     if (!inst) return NULL;
     err[0] = '\0';
     if (ensure_daemon_started(inst, err, sizeof(err)) == 0) {
         yt_log("yt-dlp daemon warmed");
+        /* Pre-init samplette session so first search is fast */
+        pthread_mutex_lock(&inst->daemon_mutex);
+        if (inst->daemon_ready && inst->daemon_in) {
+            if (fputs("SAMPLETTE_INIT\n", inst->daemon_in) != EOF) {
+                fflush(inst->daemon_in);
+                if (read_daemon_line_locked(inst, line, sizeof(line), 20000) == 0) {
+                    yt_log("samplette session pre-warmed");
+                } else {
+                    yt_log("samplette session pre-warm timeout");
+                }
+            }
+        }
+        pthread_mutex_unlock(&inst->daemon_mutex);
     } else {
         char msg[320];
         snprintf(msg, sizeof(msg), "yt-dlp daemon warmup failed: %s", err[0] ? err : "unknown");
@@ -405,6 +443,10 @@ static void normalize_provider_value(const char *in, char *out, size_t out_len) 
     }
     if (strcmp(tmp, "sc") == 0 || strcmp(tmp, "soundcloud") == 0) {
         snprintf(out, out_len, "soundcloud");
+        return;
+    }
+    if (strcmp(tmp, "samplette") == 0) {
+        snprintf(out, out_len, "samplette");
         return;
     }
     if (tmp[0] == '\0') {
@@ -856,8 +898,9 @@ static int start_stream_legacy(yt_instance_t *inst) {
         "%s"
         "-f \"%s\" -o - \"%s\" 2>/dev/null | "
         "\"%s/bin/ffmpeg\" -hide_banner -loglevel error "
+        "-probesize 128k -analyzeduration 0 "
         "-i pipe:0 -vn -sn -dn "
-        "-af \"aresample=%d:async=1:min_hard_comp=0.100:first_pts=0\" "
+        "-af \"aresample=%d\" "
         "-f s16le -ac 2 -ar %d pipe:1",
         inst->module_dir, extractor_args, legacy_fmt, inst->stream_url, inst->module_dir, MOVE_SAMPLE_RATE, MOVE_SAMPLE_RATE);
 
@@ -871,6 +914,7 @@ static int start_stream_legacy(yt_instance_t *inst) {
     inst->restart_countdown = 0;
     inst->prime_needed_samples = (size_t)MOVE_SAMPLE_RATE; /* ~0.5s stereo */
     inst->active_stream_resolved = false;
+
     yt_log("stream pipeline started (legacy)");
     return 0;
 }
@@ -878,6 +922,8 @@ static int start_stream_legacy(yt_instance_t *inst) {
 static int start_stream_resolved(yt_instance_t *inst, const char *media_url) {
     char cmd[8192];
     char clean_url[STREAM_URL_MAX];
+    char ua_flag[HTTP_HEADER_MAX + 32];
+    char ref_flag[HTTP_HEADER_MAX + 32];
 
     if (!inst || !media_url || media_url[0] == '\0') {
         set_error(inst, "resolved media url missing");
@@ -891,13 +937,28 @@ static int start_stream_resolved(yt_instance_t *inst, const char *media_url) {
 
     stop_stream(inst);
 
+    ua_flag[0] = '\0';
+    ref_flag[0] = '\0';
+    pthread_mutex_lock(&inst->resolve_mutex);
+    if (inst->resolved_user_agent[0] != '\0') {
+        snprintf(ua_flag, sizeof(ua_flag), "-user_agent \"%s\" ", inst->resolved_user_agent);
+    }
+    if (inst->resolved_referer[0] != '\0') {
+        snprintf(ref_flag, sizeof(ref_flag), "-referer \"%s\" ", inst->resolved_referer);
+    }
+    pthread_mutex_unlock(&inst->resolve_mutex);
+
     snprintf(cmd,
              sizeof(cmd),
-             "exec \"%s/bin/ffmpeg\" -hide_banner -loglevel error "
+             "exec \"%s/bin/ffmpeg\" -hide_banner -loglevel warning "
+             "%s%s"
+             "-probesize 128k -analyzeduration 0 "
              "-i \"%s\" -vn -sn -dn "
-             "-af \"aresample=%d:async=1:min_hard_comp=0.100:first_pts=0\" "
-             "-f s16le -ac 2 -ar %d pipe:1",
+             "-af \"aresample=%d\" "
+             "-f s16le -ac 2 -ar %d pipe:1 2>/dev/null",
              inst->module_dir,
+             ua_flag,
+             ref_flag,
              clean_url,
              MOVE_SAMPLE_RATE,
              MOVE_SAMPLE_RATE);
@@ -912,6 +973,7 @@ static int start_stream_resolved(yt_instance_t *inst, const char *media_url) {
     inst->restart_countdown = 0;
     inst->prime_needed_samples = (size_t)MOVE_SAMPLE_RATE; /* ~0.5s stereo */
     inst->active_stream_resolved = true;
+
     yt_log("stream pipeline started (resolved)");
     return 0;
 }
@@ -1031,12 +1093,13 @@ static int run_search_command_daemon(yt_instance_t *inst,
     char clean_query[SEARCH_QUERY_MAX];
     char req[SEARCH_QUERY_MAX + PROVIDER_MAX + 64];
     char line[DAEMON_LINE_MAX];
-    char *fields[8];
+    char *fields[14];
     int field_count;
     int count;
     int attempt;
     int timed_out;
     bool retryable_timeout = false;
+    bool is_samplette;
 
     if (!inst || !provider || !query || !results || !out_count) {
         if (err && err_len > 0) snprintf(err, err_len, "invalid search args");
@@ -1044,7 +1107,12 @@ static int run_search_command_daemon(yt_instance_t *inst,
     }
 
     normalize_provider_value(provider, clean_provider, sizeof(clean_provider));
-    sanitize_query(query, clean_query, sizeof(clean_query));
+    is_samplette = (strcmp(clean_provider, "samplette") == 0);
+    if (!is_samplette) {
+        sanitize_query(query, clean_query, sizeof(clean_query));
+    } else {
+        clean_query[0] = '\0';
+    }
 
     pthread_mutex_lock(&inst->daemon_mutex);
     for (attempt = 0; attempt < 2; attempt++) {
@@ -1056,7 +1124,26 @@ static int run_search_command_daemon(yt_instance_t *inst,
             return -1;
         }
 
-        snprintf(req, sizeof(req), "SEARCH\t%s\t%d\t%s\n", clean_provider, SEARCH_MAX_RESULTS, clean_query);
+        if (is_samplette) {
+            /* Send pending filter before searching (runs on search thread, OK to block) */
+            pthread_mutex_lock(&inst->search_mutex);
+            if (inst->samplette_pending_filter[0] != '\0') {
+                char filter_req[2048 + 32];
+                char filter_line[DAEMON_LINE_MAX];
+                snprintf(filter_req, sizeof(filter_req), "SAMPLETTE_FILTER\t%s\n", inst->samplette_pending_filter);
+                inst->samplette_pending_filter[0] = '\0';
+                pthread_mutex_unlock(&inst->search_mutex);
+                if (fputs(filter_req, inst->daemon_in) != EOF) {
+                    fflush(inst->daemon_in);
+                    (void)read_daemon_line_locked(inst, filter_line, sizeof(filter_line), DAEMON_SEARCH_TIMEOUT_MS);
+                }
+            } else {
+                pthread_mutex_unlock(&inst->search_mutex);
+            }
+            snprintf(req, sizeof(req), "SAMPLETTE_SEARCH\t%d\n", SEARCH_MAX_RESULTS);
+        } else {
+            snprintf(req, sizeof(req), "SEARCH\t%s\t%d\t%s\n", clean_provider, SEARCH_MAX_RESULTS, clean_query);
+        }
         if (fputs(req, inst->daemon_in) == EOF || fflush(inst->daemon_in) != 0) {
             if (err && err_len > 0) snprintf(err, err_len, "daemon write failed");
             stop_daemon_locked(inst);
@@ -1072,7 +1159,7 @@ static int run_search_command_daemon(yt_instance_t *inst,
                 break;
             }
 
-            field_count = split_tab_fields(line, fields, 6);
+            field_count = split_tab_fields(line, fields, 14);
             if (field_count <= 0 || !fields[0]) continue;
 
             if (strcmp(fields[0], "SEARCH_BEGIN") == 0) {
@@ -1088,14 +1175,27 @@ static int run_search_command_daemon(yt_instance_t *inst,
                     snprintf(results[count].title, sizeof(results[count].title), "%s", fields[2]);
                     snprintf(results[count].channel, sizeof(results[count].channel), "%s", field_count >= 4 ? fields[3] : "");
                     snprintf(results[count].duration, sizeof(results[count].duration), "%s", field_count >= 5 ? fields[4] : "");
-                    snprintf(results[count].provider, sizeof(results[count].provider), "%s", clean_provider);
+                    snprintf(results[count].provider, sizeof(results[count].provider), "%s",
+                             is_samplette ? "youtube" : clean_provider);
                     sanitize_display_text(results[count].title);
                     sanitize_display_text(results[count].channel);
                     sanitize_display_text(results[count].duration);
 
+                    /* Extended metadata fields (positions 6-12) from samplette */
+                    snprintf(results[count].meta_key, sizeof(results[count].meta_key), "%s", field_count >= 7 ? fields[6] : "");
+                    snprintf(results[count].meta_scale, sizeof(results[count].meta_scale), "%s", field_count >= 8 ? fields[7] : "");
+                    snprintf(results[count].meta_tempo, sizeof(results[count].meta_tempo), "%s", field_count >= 9 ? fields[8] : "");
+                    snprintf(results[count].meta_genre, sizeof(results[count].meta_genre), "%s", field_count >= 10 ? fields[9] : "");
+                    snprintf(results[count].meta_style, sizeof(results[count].meta_style), "%s", field_count >= 11 ? fields[10] : "");
+                    snprintf(results[count].meta_country, sizeof(results[count].meta_country), "%s", field_count >= 12 ? fields[11] : "");
+                    snprintf(results[count].meta_year, sizeof(results[count].meta_year), "%s", field_count >= 13 ? fields[12] : "");
+                    sanitize_display_text(results[count].meta_genre);
+                    sanitize_display_text(results[count].meta_style);
+                    sanitize_display_text(results[count].meta_country);
+
                     if (field_count >= 6) {
                         item_url = fields[5];
-                    } else if (strcmp(clean_provider, "youtube") == 0) {
+                    } else if (strcmp(clean_provider, "youtube") == 0 || is_samplette) {
                         snprintf(fallback_url, sizeof(fallback_url), "https://www.youtube.com/watch?v=%s", results[count].id);
                         item_url = fallback_url;
                     }
@@ -1494,17 +1594,22 @@ static void* resolve_thread_main(void *arg) {
     user_agent[0] = '\0';
     referer[0] = '\0';
     err[0] = '\0';
-    rc = resolve_stream_url(inst,
-                            source_provider,
-                            source_url,
-                            media_url,
-                            sizeof(media_url),
-                            user_agent,
-                            sizeof(user_agent),
-                            referer,
-                            sizeof(referer),
-                            err,
-                            sizeof(err));
+    {
+        uint64_t resolve_start = now_ms();
+        rc = resolve_stream_url(inst,
+                                source_provider,
+                                source_url,
+                                media_url,
+                                sizeof(media_url),
+                                user_agent,
+                                sizeof(user_agent),
+                                referer,
+                                sizeof(referer),
+                                err,
+                                sizeof(err));
+        snprintf(log_msg, sizeof(log_msg), "resolve_stream_url took %llums", (unsigned long long)(now_ms() - resolve_start));
+        yt_log(log_msg);
+    }
 
     pthread_mutex_lock(&inst->resolve_mutex);
     if (strcmp(inst->stream_provider, source_provider) == 0 &&
@@ -1575,6 +1680,134 @@ static int start_resolve_async(yt_instance_t *inst) {
     inst->resolve_thread_valid = true;
     pthread_mutex_unlock(&inst->resolve_mutex);
     return 0;
+}
+
+static void* prefetch_thread_main(void *arg) {
+    yt_instance_t *inst = (yt_instance_t *)arg;
+    char source_url[STREAM_URL_MAX];
+    char media_url[STREAM_URL_MAX];
+    char user_agent[HTTP_HEADER_MAX];
+    char referer[HTTP_HEADER_MAX];
+    char err[256];
+    int rc;
+    char log_msg[320];
+
+    if (!inst) return NULL;
+
+    pthread_mutex_lock(&inst->prefetch_mutex);
+    snprintf(source_url, sizeof(source_url), "%s", inst->prefetch_source_url);
+    pthread_mutex_unlock(&inst->prefetch_mutex);
+
+    if (source_url[0] == '\0') {
+        pthread_mutex_lock(&inst->prefetch_mutex);
+        inst->prefetch_thread_running = false;
+        pthread_mutex_unlock(&inst->prefetch_mutex);
+        return NULL;
+    }
+
+    snprintf(log_msg, sizeof(log_msg), "prefetch resolve started url=%s", source_url);
+    yt_log(log_msg);
+
+    media_url[0] = '\0';
+    user_agent[0] = '\0';
+    referer[0] = '\0';
+    err[0] = '\0';
+    rc = resolve_stream_url(inst, "youtube", source_url,
+                            media_url, sizeof(media_url),
+                            user_agent, sizeof(user_agent),
+                            referer, sizeof(referer),
+                            err, sizeof(err));
+
+    pthread_mutex_lock(&inst->prefetch_mutex);
+    if (rc == 0 && strcmp(inst->prefetch_source_url, source_url) == 0) {
+        snprintf(inst->prefetch_media_url, sizeof(inst->prefetch_media_url), "%s", media_url);
+        snprintf(inst->prefetch_user_agent, sizeof(inst->prefetch_user_agent), "%s", user_agent);
+        snprintf(inst->prefetch_referer, sizeof(inst->prefetch_referer), "%s", referer);
+        inst->prefetch_ready = true;
+        snprintf(log_msg, sizeof(log_msg), "prefetch resolve done url=%s", source_url);
+        yt_log(log_msg);
+    } else {
+        snprintf(log_msg, sizeof(log_msg), "prefetch resolve failed: %s", err[0] ? err : "unknown");
+        yt_log(log_msg);
+    }
+    inst->prefetch_thread_running = false;
+    pthread_mutex_unlock(&inst->prefetch_mutex);
+    return NULL;
+}
+
+static void start_prefetch_next(yt_instance_t *inst) {
+    int next_idx;
+    char next_url[SEARCH_URL_MAX];
+
+    if (!inst || !inst->samplette_auto_advance) return;
+
+    pthread_mutex_lock(&inst->search_mutex);
+    next_idx = inst->samplette_result_index + 1;
+    if (next_idx < inst->search_count) {
+        snprintf(next_url, sizeof(next_url), "%s", inst->search_results[next_idx].url);
+    } else {
+        next_url[0] = '\0';
+    }
+    pthread_mutex_unlock(&inst->search_mutex);
+
+    if (next_url[0] == '\0') return;
+
+    pthread_mutex_lock(&inst->prefetch_mutex);
+
+    /* Already prefetching or prefetched this URL */
+    if (strcmp(inst->prefetch_source_url, next_url) == 0) {
+        pthread_mutex_unlock(&inst->prefetch_mutex);
+        return;
+    }
+
+    if (inst->prefetch_thread_valid && !inst->prefetch_thread_running) {
+        pthread_join(inst->prefetch_thread, NULL);
+        inst->prefetch_thread_valid = false;
+    }
+
+    if (inst->prefetch_thread_running) {
+        pthread_mutex_unlock(&inst->prefetch_mutex);
+        return;
+    }
+
+    snprintf(inst->prefetch_source_url, sizeof(inst->prefetch_source_url), "%s", next_url);
+    inst->prefetch_media_url[0] = '\0';
+    inst->prefetch_user_agent[0] = '\0';
+    inst->prefetch_referer[0] = '\0';
+    inst->prefetch_ready = false;
+    inst->prefetch_thread_running = true;
+
+    if (pthread_create(&inst->prefetch_thread, NULL, prefetch_thread_main, inst) != 0) {
+        inst->prefetch_thread_running = false;
+        pthread_mutex_unlock(&inst->prefetch_mutex);
+        return;
+    }
+
+    inst->prefetch_thread_valid = true;
+    pthread_mutex_unlock(&inst->prefetch_mutex);
+}
+
+static bool try_use_prefetch(yt_instance_t *inst, const char *source_url) {
+    bool hit = false;
+    if (!inst || !source_url || source_url[0] == '\0') return false;
+
+    pthread_mutex_lock(&inst->prefetch_mutex);
+    if (inst->prefetch_ready && strcmp(inst->prefetch_source_url, source_url) == 0) {
+        pthread_mutex_lock(&inst->resolve_mutex);
+        inst->resolve_ready = true;
+        inst->resolve_failed = false;
+        snprintf(inst->resolved_media_url, sizeof(inst->resolved_media_url), "%s", inst->prefetch_media_url);
+        snprintf(inst->resolved_user_agent, sizeof(inst->resolved_user_agent), "%s", inst->prefetch_user_agent);
+        snprintf(inst->resolved_referer, sizeof(inst->resolved_referer), "%s", inst->prefetch_referer);
+        inst->resolve_error[0] = '\0';
+        pthread_mutex_unlock(&inst->resolve_mutex);
+        inst->prefetch_ready = false;
+        inst->prefetch_source_url[0] = '\0';
+        hit = true;
+        yt_log("prefetch cache hit — skipping resolve");
+    }
+    pthread_mutex_unlock(&inst->prefetch_mutex);
+    return hit;
 }
 
 static void pump_pipe(yt_instance_t *inst) {
@@ -1684,6 +1917,7 @@ static void* v2_create_instance(const char *module_dir, const char *json_default
     pthread_mutex_init(&inst->search_mutex, NULL);
     pthread_mutex_init(&inst->daemon_mutex, NULL);
     pthread_mutex_init(&inst->resolve_mutex, NULL);
+    pthread_mutex_init(&inst->prefetch_mutex, NULL);
     snprintf(inst->search_status, sizeof(inst->search_status), "idle");
     (void)json_defaults;
     start_warmup_if_needed(inst);
@@ -1720,6 +1954,12 @@ static void v2_destroy_instance(void *instance) {
         inst->search_thread_running = false;
     }
 
+    if (inst->prefetch_thread_valid) {
+        pthread_join(inst->prefetch_thread, NULL);
+        inst->prefetch_thread_valid = false;
+        inst->prefetch_thread_running = false;
+    }
+
     pthread_mutex_lock(&inst->daemon_mutex);
     stop_daemon_locked(inst);
     pthread_mutex_unlock(&inst->daemon_mutex);
@@ -1727,6 +1967,7 @@ static void v2_destroy_instance(void *instance) {
     pthread_mutex_destroy(&inst->resolve_mutex);
     pthread_mutex_destroy(&inst->daemon_mutex);
     pthread_mutex_destroy(&inst->search_mutex);
+    pthread_mutex_destroy(&inst->prefetch_mutex);
     free(inst);
 }
 
@@ -1918,6 +2159,65 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
         return;
     }
 
+    if (strcmp(key, "next_track_step") == 0) {
+        if (parse_trigger_value(val, &inst->next_track_step) &&
+            allow_trigger(&inst->last_next_track_ms, DEBOUNCE_PLAY_PAUSE_MS)) {
+            pthread_mutex_lock(&inst->search_mutex);
+            if (inst->search_count > 0) {
+                int next_idx = inst->samplette_result_index + 1;
+                if (next_idx >= inst->search_count) next_idx = 0;
+                inst->samplette_result_index = next_idx;
+                if (next_idx < inst->search_count) {
+                    char next_url[SEARCH_URL_MAX];
+                    snprintf(next_url, sizeof(next_url), "%s", inst->search_results[next_idx].url);
+                    pthread_mutex_unlock(&inst->search_mutex);
+                    stop_stream(inst);
+                    snprintf(inst->stream_provider, sizeof(inst->stream_provider), "youtube");
+                    snprintf(inst->stream_url, sizeof(inst->stream_url), "%s", next_url);
+                    restart_stream_from_beginning(inst, 0);
+                    if (!try_use_prefetch(inst, next_url)) {
+                        pthread_mutex_lock(&inst->resolve_mutex);
+                        inst->resolve_ready = false;
+                        inst->resolve_failed = false;
+                        inst->resolved_media_url[0] = '\0';
+                        inst->resolved_user_agent[0] = '\0';
+                        inst->resolved_referer[0] = '\0';
+                        inst->resolve_error[0] = '\0';
+                        pthread_mutex_unlock(&inst->resolve_mutex);
+                        (void)start_resolve_async(inst);
+                    }
+                    return;
+                }
+            }
+            pthread_mutex_unlock(&inst->search_mutex);
+        }
+        return;
+    }
+
+    if (strcmp(key, "samplette_result_index") == 0) {
+        int idx = (int)strtol(val, NULL, 10);
+        if (idx >= 0 && idx < SEARCH_MAX_RESULTS) {
+            inst->samplette_result_index = idx;
+        }
+        return;
+    }
+
+    if (strcmp(key, "samplette_auto_advance") == 0) {
+        inst->samplette_auto_advance = (strcmp(val, "1") == 0 || strcmp(val, "true") == 0);
+        return;
+    }
+
+    if (strcmp(key, "samplette_filter") == 0) {
+        /* Stash filter for the search thread to send (non-blocking) */
+        pthread_mutex_lock(&inst->search_mutex);
+        snprintf(inst->samplette_pending_filter, sizeof(inst->samplette_pending_filter), "%s", val);
+        snprintf(inst->search_provider, sizeof(inst->search_provider), "samplette");
+        inst->samplette_result_index = 0;
+        (void)start_search_async(inst, "samplette");
+        pthread_mutex_unlock(&inst->search_mutex);
+        return;
+    }
+
     if (strcmp(key, "search_query") == 0) {
         pthread_mutex_lock(&inst->search_mutex);
         if (val[0] == '\0') {
@@ -1975,6 +2275,15 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
     }
     if (strcmp(key, "preset_name") == 0 || strcmp(key, "name") == 0) {
         return snprintf(buf, (size_t)buf_len, "Webstream");
+    }
+    if (strcmp(key, "next_track_step") == 0) {
+        return snprintf(buf, (size_t)buf_len, "idle");
+    }
+    if (strcmp(key, "samplette_result_index") == 0) {
+        return snprintf(buf, (size_t)buf_len, "%d", inst ? inst->samplette_result_index : 0);
+    }
+    if (strcmp(key, "samplette_auto_advance") == 0) {
+        return snprintf(buf, (size_t)buf_len, "%s", (inst && inst->samplette_auto_advance) ? "1" : "0");
     }
     if (strcmp(key, "stream_url") == 0) {
         return snprintf(buf, (size_t)buf_len, "%s", inst ? inst->stream_url : "");
@@ -2087,6 +2396,69 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
             return ret;
         }
 
+        idx = get_result_index(key, "search_result_key_");
+        if (idx >= 0) {
+            int ret = -1;
+            pthread_mutex_lock(&inst->search_mutex);
+            if (idx < inst->search_count) ret = snprintf(buf, (size_t)buf_len, "%s", inst->search_results[idx].meta_key);
+            pthread_mutex_unlock(&inst->search_mutex);
+            return ret;
+        }
+
+        idx = get_result_index(key, "search_result_scale_");
+        if (idx >= 0) {
+            int ret = -1;
+            pthread_mutex_lock(&inst->search_mutex);
+            if (idx < inst->search_count) ret = snprintf(buf, (size_t)buf_len, "%s", inst->search_results[idx].meta_scale);
+            pthread_mutex_unlock(&inst->search_mutex);
+            return ret;
+        }
+
+        idx = get_result_index(key, "search_result_tempo_");
+        if (idx >= 0) {
+            int ret = -1;
+            pthread_mutex_lock(&inst->search_mutex);
+            if (idx < inst->search_count) ret = snprintf(buf, (size_t)buf_len, "%s", inst->search_results[idx].meta_tempo);
+            pthread_mutex_unlock(&inst->search_mutex);
+            return ret;
+        }
+
+        idx = get_result_index(key, "search_result_genre_");
+        if (idx >= 0) {
+            int ret = -1;
+            pthread_mutex_lock(&inst->search_mutex);
+            if (idx < inst->search_count) ret = snprintf(buf, (size_t)buf_len, "%s", inst->search_results[idx].meta_genre);
+            pthread_mutex_unlock(&inst->search_mutex);
+            return ret;
+        }
+
+        idx = get_result_index(key, "search_result_style_");
+        if (idx >= 0) {
+            int ret = -1;
+            pthread_mutex_lock(&inst->search_mutex);
+            if (idx < inst->search_count) ret = snprintf(buf, (size_t)buf_len, "%s", inst->search_results[idx].meta_style);
+            pthread_mutex_unlock(&inst->search_mutex);
+            return ret;
+        }
+
+        idx = get_result_index(key, "search_result_country_");
+        if (idx >= 0) {
+            int ret = -1;
+            pthread_mutex_lock(&inst->search_mutex);
+            if (idx < inst->search_count) ret = snprintf(buf, (size_t)buf_len, "%s", inst->search_results[idx].meta_country);
+            pthread_mutex_unlock(&inst->search_mutex);
+            return ret;
+        }
+
+        idx = get_result_index(key, "search_result_year_");
+        if (idx >= 0) {
+            int ret = -1;
+            pthread_mutex_lock(&inst->search_mutex);
+            if (idx < inst->search_count) ret = snprintf(buf, (size_t)buf_len, "%s", inst->search_results[idx].meta_year);
+            pthread_mutex_unlock(&inst->search_mutex);
+            return ret;
+        }
+
         idx = get_result_index(key, "search_result_");
         if (idx >= 0) {
             int ret = -1;
@@ -2132,7 +2504,42 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
         return;
     }
 
+    /* Anti-idle: host idle-gates slots whose output stays below abs(4).
+     * Inject keepalive before early returns; re-inject after ring_pop at end. */
+    out_interleaved_lr[0] = 5;
+
     if (inst->stream_eof) {
+        if (inst->samplette_auto_advance) {
+            int next_idx;
+            pthread_mutex_lock(&inst->search_mutex);
+            next_idx = inst->samplette_result_index + 1;
+            if (next_idx < inst->search_count) {
+                char next_url[SEARCH_URL_MAX];
+                inst->samplette_result_index = next_idx;
+                snprintf(next_url, sizeof(next_url), "%s", inst->search_results[next_idx].url);
+                pthread_mutex_unlock(&inst->search_mutex);
+                stop_stream(inst);
+                inst->stream_eof = false;
+                snprintf(inst->stream_provider, sizeof(inst->stream_provider), "youtube");
+                snprintf(inst->stream_url, sizeof(inst->stream_url), "%s", next_url);
+                if (!try_use_prefetch(inst, next_url)) {
+                    pthread_mutex_lock(&inst->resolve_mutex);
+                    inst->resolve_ready = false;
+                    inst->resolve_failed = false;
+                    inst->resolved_media_url[0] = '\0';
+                    inst->resolved_user_agent[0] = '\0';
+                    inst->resolved_referer[0] = '\0';
+                    inst->resolve_error[0] = '\0';
+                    pthread_mutex_unlock(&inst->resolve_mutex);
+                    restart_stream_from_beginning(inst, 0);
+                    (void)start_resolve_async(inst);
+                } else {
+                    restart_stream_from_beginning(inst, 0);
+                }
+            } else {
+                pthread_mutex_unlock(&inst->search_mutex);
+            }
+        }
         return;
     }
 
@@ -2166,6 +2573,8 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
                     inst->resolve_failed = true;
                     pthread_mutex_unlock(&inst->resolve_mutex);
                     resolve_failed = true;
+                } else {
+                    start_prefetch_next(inst);
                 }
             } else if (resolve_failed) {
                 /* Resolve failed in background; fail over to legacy stream pipeline now. */
@@ -2195,7 +2604,8 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
     pump_pipe(inst);
 
     if (inst->prime_needed_samples > 0) {
-        if (ring_available(inst) < inst->prime_needed_samples && !inst->stream_eof) {
+        size_t avail = ring_available(inst);
+        if (avail < inst->prime_needed_samples && !inst->stream_eof) {
             return;
         }
         inst->prime_needed_samples = 0;
@@ -2220,6 +2630,10 @@ static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int fra
             out_interleaved_lr[i] = (int16_t)s;
         }
     }
+
+    /* Re-inject anti-idle after ring_pop/gain may have overwritten position 0 */
+    if (out_interleaved_lr[0] < 5 && out_interleaved_lr[0] > -5)
+        out_interleaved_lr[0] = 5;
 }
 
 static plugin_api_v2_t g_plugin_api_v2 = {
