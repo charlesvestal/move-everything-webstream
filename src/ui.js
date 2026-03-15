@@ -1078,7 +1078,14 @@ function refreshState() {
     } else if (searchStatus === 'no_results') {
       statusMessage = (searchProvider === 'samplette' || searchProvider === 'cratedig') ? 'No tracks found' : 'No results';
     } else if (searchStatus === 'error') {
-      statusMessage = 'Search failed';
+      const errDetail = host_module_get_param('search_error') || '';
+      if (errDetail.indexOf('429') >= 0) {
+        statusMessage = 'Rate limited - wait 1min';
+      } else if (errDetail.indexOf('timeout') >= 0) {
+        statusMessage = 'Search timeout - retry';
+      } else {
+        statusMessage = 'Search failed';
+      }
     } else if (searchStatus === 'busy') {
       statusMessage = 'Search busy';
     }

@@ -709,7 +709,8 @@ class CrateDigSession:
     MAX_EXCLUDE_IDS = 200
     USER_AGENT = "MoveAnythingWebstream/1.0 +https://github.com/charlesvestal/move-anything-webstream"
 
-    def __init__(self):
+    def __init__(self, token: str = ""):
+        self.token = token
         self.filter_genre = ""
         self.filter_style = ""
         self.filter_decade = ""
@@ -722,10 +723,10 @@ class CrateDigSession:
         url = f"{self.DISCOGS_BASE}{path}"
         if params:
             url += "?" + urllib.parse.urlencode(params, doseq=True)
-        req = urllib.request.Request(url, headers={
-            "User-Agent": self.USER_AGENT,
-            "Authorization": "Discogs token=cVrcGHvFfdmrONStfnyLvByBBdsheGrOpSKnNYLb",
-        })
+        headers = {"User-Agent": self.USER_AGENT}
+        if self.token:
+            headers["Authorization"] = f"Discogs token={self.token}"
+        req = urllib.request.Request(url, headers=headers)
         for attempt in range(3):
             try:
                 with urllib.request.urlopen(req, timeout=20) as resp:
@@ -1010,7 +1011,17 @@ def main() -> int:
         yt_dlp_mod = None
 
     samplette = SampletteSession()
-    cratedig = CrateDigSession()
+    config = load_provider_config()
+    discogs_token = ""
+    block = config_provider_block(config, "cratedig")
+    for k in ("token", "api_key"):
+        v = block.get(k)
+        if isinstance(v, str) and v.strip():
+            discogs_token = v.strip()
+            break
+    if not discogs_token:
+        discogs_token = os.environ.get("DISCOGS_TOKEN", "").strip()
+    cratedig = CrateDigSession(token=discogs_token)
 
     write_fields("READY")
 
