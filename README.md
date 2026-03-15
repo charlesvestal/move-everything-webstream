@@ -19,6 +19,7 @@ Third-party, unsupported community module. Not affiliated with or endorsed by Ab
   - `soundcloud` (via `yt-dlp`)
   - `archive` (via archive.org APIs)
   - `freesound` (via FreeSound API; requires token)
+  - `cratedig` — random music discovery via Discogs API (optional token)
 
 ## Provider Configuration
 
@@ -37,7 +38,10 @@ Example:
     },
     "archive": { "enabled": true },
     "youtube": { "enabled": true },
-    "soundcloud": { "enabled": true }
+    "soundcloud": { "enabled": true },
+    "cratedig": {
+      "token": "YOUR_DISCOGS_PERSONAL_TOKEN"
+    }
   }
 }
 ```
@@ -45,6 +49,19 @@ Example:
 FreeSound token can also be supplied via env var:
 
 - `FREESOUND_API_KEY` (or `FREESOUND_TOKEN`)
+
+### Crate Dig (Discogs)
+
+Crate Dig discovers random music by searching [Discogs](https://www.discogs.com/) for releases with YouTube videos. Filter by genre, style, decade, and country.
+
+Works without a token (25 requests/min per device). For higher limits (60/min), add a free Discogs personal access token:
+
+1. Create a Discogs account at [discogs.com](https://www.discogs.com/)
+2. Go to [Settings → Developers](https://www.discogs.com/settings/developers)
+3. Click "Generate new token"
+4. Add to `webstream_providers.json` (see above) or set `DISCOGS_TOKEN` env var
+
+Search results provided by [Discogs](https://www.discogs.com/).
 
 ## Build
 

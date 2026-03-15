@@ -43,7 +43,7 @@ const PROVIDER_TAGS = {
   freesound: '[FS]',
   archive: '[AR]',
   soundcloud: '[SC]',
-  cratedig: '[CD] via Discogs',
+  cratedig: '[CD]',
   samplette: '[SA]'
 };
 
@@ -915,6 +915,7 @@ function buildCratedigRootItems() {
   }
   items.push(createAction('[Filters...]', function() { openCratedigFiltersMenu(); }));
   items.push(createAction('[History...]', function() { openCratedigHistoryMenu(); }));
+  items.push(createAction('Results via Discogs', function() {}));
   items.push(createAction('[Change Provider...]', function() {
     clearSearchState(true);
     openProviderMenu();

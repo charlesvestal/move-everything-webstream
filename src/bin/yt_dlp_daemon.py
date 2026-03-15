@@ -739,12 +739,23 @@ class CrateDigSession:
 
     def set_filter(self, filter_json: str):
         data = json.loads(filter_json)
-        self.filter_genre = data.get("genre", "")
-        self.filter_style = data.get("style", "")
-        self.filter_decade = data.get("decade", "")
-        self.filter_country = data.get("country", "")
-        self.exclude_ids = []
-        self.pool_size_cache = {}
+        new_genre = data.get("genre", "")
+        new_style = data.get("style", "")
+        new_decade = data.get("decade", "")
+        new_country = data.get("country", "")
+        filters_changed = (
+            new_genre != self.filter_genre or
+            new_style != self.filter_style or
+            new_decade != self.filter_decade or
+            new_country != self.filter_country
+        )
+        self.filter_genre = new_genre
+        self.filter_style = new_style
+        self.filter_decade = new_decade
+        self.filter_country = new_country
+        if filters_changed:
+            self.exclude_ids = []
+            self.pool_size_cache = {}
 
     def _build_search_params(self) -> dict:
         params = {"type": "release", "per_page": "5"}

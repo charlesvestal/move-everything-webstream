@@ -47,12 +47,48 @@
             " [FS] FreeSound",
             " [AR] Archive.org",
             " [SC] SoundCloud",
+            " [CD] Crate Dig",
             "",
             "Up to 20 results",
             "per search.",
             "",
             "Search history",
             "saved (max 20)."
+          ]
+        },
+        {
+          "title": "Crate Dig",
+          "lines": [
+            "Random music",
+            "discovery powered",
+            "by Discogs.",
+            "",
+            "Filter by genre,",
+            "style, decade, and",
+            "country. Hit [Dig!]",
+            "for random tracks.",
+            "",
+            "Finds releases on",
+            "Discogs with YouTube",
+            "videos and plays",
+            "them directly.",
+            "",
+            "Uses Discogs API.",
+            "Optional: add your",
+            "own token for higher",
+            "rate limits (60/min",
+            "vs 25/min).",
+            "",
+            "Add token to config:",
+            "webstream_providers",
+            ".json with:",
+            "{\"providers\":",
+            " {\"cratedig\":",
+            "  {\"token\":\"...\"}}}",
+            "",
+            "Get a free token at",
+            "discogs.com/settings",
+            "/developers"
           ]
         }
       ]
