@@ -628,6 +628,9 @@ static void ring_push(yt_instance_t *inst, const int16_t *samples, size_t n) {
         inst->write_abs++;
     }
 
+    /* Only snap play_abs forward if old data is actually being overwritten.
+     * The backpressure check in pump_pipe should prevent this in normal
+     * operation, but guard against it anyway. */
     oldest = ring_oldest_abs(inst);
     if (inst->play_abs < oldest) {
         inst->dropped_samples += (oldest - inst->play_abs);
@@ -779,6 +782,7 @@ static void seek_relative_seconds(yt_instance_t *inst, long delta_sec) {
     int64_t delta_samples;
     int64_t oldest_samples;
     int64_t newest_samples;
+    char log_msg[256];
 
     if (!inst || inst->stream_url[0] == '\0') return;
 
@@ -790,6 +794,13 @@ static void seek_relative_seconds(yt_instance_t *inst, long delta_sec) {
     newest_samples = (int64_t)inst->write_abs;
     if (target_samples < oldest_samples) target_samples = oldest_samples;
     if (target_samples > newest_samples) target_samples = newest_samples;
+
+    snprintf(log_msg, sizeof(log_msg),
+             "seek delta=%lds cur=%lld target=%lld oldest=%lld newest=%lld moved=%lld",
+             delta_sec, (long long)current_samples, (long long)target_samples,
+             (long long)oldest_samples, (long long)newest_samples,
+             (long long)(target_samples - current_samples));
+    yt_log(log_msg);
 
     inst->play_abs = (uint64_t)target_samples;
     inst->played_samples = (size_t)inst->play_abs;
@@ -1820,8 +1831,10 @@ static void pump_pipe(yt_instance_t *inst) {
     int16_t samples[2048];
 
     while (inst->pipe && !inst->stream_eof) {
-        if (ring_available(inst) + 2048 >= RING_SAMPLES) {
-            break; /* Let pipe backpressure pace producer; avoid dropping */
+        /* Stop pumping when we have 45s of audio buffered ahead of play position.
+         * This reserves ~15s of the 60s ring for rewind. */
+        if (ring_available(inst) + 2048 >= (size_t)(MOVE_SAMPLE_RATE * 2 * 45)) {
+            break;
         }
 
         ssize_t n = read(inst->pipe_fd, buf, sizeof(buf));

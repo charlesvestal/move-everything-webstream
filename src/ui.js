@@ -43,7 +43,7 @@ const PROVIDER_TAGS = {
   freesound: '[FS]',
   archive: '[AR]',
   soundcloud: '[SC]',
-  cratedig: '[CD]',
+  cratedig: '[CD] via Discogs',
   samplette: '[SA]'
 };
 
