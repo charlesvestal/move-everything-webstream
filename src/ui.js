@@ -26,6 +26,7 @@ import { drawStackMenu } from '/data/UserData/move-anything/shared/menu_render.m
 const MAX_MENU_RESULTS = 20;
 const MAX_SEARCH_HISTORY = 20;
 const SEARCH_HISTORY_PATH = '/data/UserData/move-anything/config/webstream_search_history.json';
+const CRATEDIG_FILTER_PATH = '/data/UserData/move-anything/config/webstream_cratedig_filter.json';
 const LEGACY_SEARCH_HISTORY_PATH = '/data/UserData/move-anything/webstream_search_history.json';
 const LEGACY_SEARCH_HISTORY_PATH_2 = '/data/UserData/move-anything/yt_search_history.json';
 const SPINNER = ['-', '/', '|', '\\'];
@@ -124,6 +125,7 @@ let shiftHeld = false;
 let menuState = createMenuState();
 let menuStack = createMenuStack();
 let rootMenu = null;
+
 
 let tickCounter = 0;
 let spinnerTick = 0;
@@ -322,6 +324,25 @@ function saveSearchHistoryToDisk() {
   writeTextFile(SEARCH_HISTORY_PATH, payload);
 }
 
+function loadCratedigFilterFromDisk() {
+  try {
+    const raw = std.loadFile(CRATEDIG_FILTER_PATH);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object') {
+      cratedigFilter.genre = parsed.genre || '';
+      cratedigFilter.style = parsed.style || '';
+      cratedigFilter.decade = parsed.decade || '';
+      cratedigFilter.country = parsed.country || '';
+    }
+  } catch (e) {}
+}
+
+function saveCratedigFilterToDisk() {
+  const payload = JSON.stringify(cratedigFilter) + '\n';
+  writeTextFile(CRATEDIG_FILTER_PATH, payload);
+}
+
 function submitSearch(providerId, query) {
   const provider = normalizeProvider(providerId);
   const q = String(query || '').trim();
@@ -401,7 +422,6 @@ function openProviderMenu() {
       searchProvider = 'cratedig';
       host_module_set_param('search_provider', 'cratedig');
       rebuildMenu();
-      cratedigShuffle();
       return;
     }
     if (provider.id === 'samplette') {
@@ -444,6 +464,7 @@ function sampletteNextTrack() {
 }
 
 function cratedigApplyFilter() {
+  saveCratedigFilterToDisk();
   host_module_set_param('cratedig_filter', JSON.stringify(cratedigFilter));
   statusMessage = 'Digging...';
   needsRedraw = true;
@@ -594,6 +615,7 @@ function openCratedigGenreMenu() {
       refreshCratedigFiltersMenu();
     });
   });
+  items.unshift(createAction('[Back]', function() { navigateCratedigBack(); }));
   menuStack.push({ title: 'Genre', items: items, selectedIndex: 0 });
   menuState.selectedIndex = 0;
   needsRedraw = true;
@@ -612,6 +634,7 @@ function openCratedigStyleMenu() {
       refreshCratedigFiltersMenu();
     });
   });
+  items.unshift(createAction('[Back]', function() { navigateCratedigBack(); }));
   menuStack.push({ title: 'Style', items: items, selectedIndex: 0 });
   menuState.selectedIndex = 0;
   needsRedraw = true;
@@ -628,6 +651,7 @@ function openCratedigDecadeMenu() {
       refreshCratedigFiltersMenu();
     });
   });
+  items.unshift(createAction('[Back]', function() { navigateCratedigBack(); }));
   menuStack.push({ title: 'Decade', items: items, selectedIndex: 0 });
   menuState.selectedIndex = 0;
   needsRedraw = true;
@@ -644,8 +668,18 @@ function openCratedigCountryMenu() {
       refreshCratedigFiltersMenu();
     });
   });
+  items.unshift(createAction('[Back]', function() { navigateCratedigBack(); }));
   menuStack.push({ title: 'Country', items: items, selectedIndex: 0 });
   menuState.selectedIndex = 0;
+  needsRedraw = true;
+}
+
+function navigateCratedigBack() {
+  if (menuStack.depth() > 1) {
+    menuStack.pop();
+    const cur = menuStack.current();
+    if (cur) menuState.selectedIndex = cur.selectedIndex || 0;
+  }
   needsRedraw = true;
 }
 
@@ -656,6 +690,7 @@ function openCratedigFiltersMenu() {
   const countryLabel = cratedigFilter.country || 'Any';
 
   const items = [
+    createAction('[Back]', function() { navigateCratedigBack(); }),
     createAction('Genre: ' + genreLabel, function() { openCratedigGenreMenu(); }),
     createAction('Style: ' + styleLabel, function() { openCratedigStyleMenu(); }),
     createAction('Decade: ' + decadeLabel, function() { openCratedigDecadeMenu(); }),
@@ -663,6 +698,7 @@ function openCratedigFiltersMenu() {
     createAction('[Apply & Dig]', function() {
       while (menuStack.depth() > 1) menuStack.pop();
       menuState.selectedIndex = 0;
+      rebuildMenu();
       cratedigShuffle();
     })
   ];
@@ -707,7 +743,7 @@ function openNowPlayingMenu() {
   if (!r) {
     menuStack.push({
       title: 'Now Playing',
-      items: [createAction('(Nothing playing)', () => {})],
+      items: [createAction('[Back]', function() { navigateCratedigBack(); }), createAction('(Nothing playing)', () => {})],
       selectedIndex: 0
     });
     menuState.selectedIndex = 0;
@@ -717,6 +753,7 @@ function openNowPlayingMenu() {
 
   const noop = () => {};
   const items = [];
+  items.push(createAction('[Back]', function() { navigateCratedigBack(); }));
   items.push(createAction(r.title || '(untitled)', noop));
   if (r.channel) items.push(createAction(`By: ${r.channel}`, noop));
   if (r.duration) items.push(createAction(`Duration: ${r.duration}`, noop));
@@ -781,7 +818,7 @@ function openCratedigHistoryMenu() {
   if (results.length === 0) {
     menuStack.push({
       title: 'History',
-      items: [createAction('(No tracks yet)', function() {})],
+      items: [createAction('[Back]', function() { navigateCratedigBack(); }), createAction('(No tracks yet)', function() {})],
       selectedIndex: 0
     });
     menuState.selectedIndex = 0;
@@ -813,6 +850,7 @@ function openCratedigHistoryMenu() {
     );
   }
 
+  items.unshift(createAction('[Back]', function() { navigateCratedigBack(); }));
   menuStack.push({ title: 'History', items: items, selectedIndex: 0 });
   menuState.selectedIndex = 0;
   needsRedraw = true;
@@ -1131,6 +1169,7 @@ globalThis.init = function () {
   statusMessage = 'Click: select';
   results = [];
   loadSearchHistoryFromDisk();
+  loadCratedigFilterFromDisk();
   shiftHeld = false;
 
   menuState = createMenuState();
@@ -1254,6 +1293,7 @@ globalThis.onMidiMessageInternal = function (data) {
     handleTextEntryMidi(data);
     return;
   }
+
 
   const current = menuStack.current();
   if (!current) {

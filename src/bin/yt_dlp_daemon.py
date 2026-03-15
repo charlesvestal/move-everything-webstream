@@ -718,12 +718,23 @@ class CrateDigSession:
         self.pool_size_cache: dict = {}
 
     def _request(self, path: str, params: dict = None) -> dict:
+        import time
         url = f"{self.DISCOGS_BASE}{path}"
         if params:
             url += "?" + urllib.parse.urlencode(params, doseq=True)
-        req = urllib.request.Request(url, headers={"User-Agent": self.USER_AGENT})
-        with urllib.request.urlopen(req, timeout=20) as resp:
-            return json.loads(resp.read().decode("utf-8", errors="replace"))
+        req = urllib.request.Request(url, headers={
+            "User-Agent": self.USER_AGENT,
+            "Authorization": "Discogs token=cVrcGHvFfdmrONStfnyLvByBBdsheGrOpSKnNYLb",
+        })
+        for attempt in range(3):
+            try:
+                with urllib.request.urlopen(req, timeout=20) as resp:
+                    return json.loads(resp.read().decode("utf-8", errors="replace"))
+            except urllib.error.HTTPError as exc:
+                if exc.code == 429 and attempt < 2:
+                    time.sleep(2 * (attempt + 1))
+                    continue
+                raise
 
     def set_filter(self, filter_json: str):
         data = json.loads(filter_json)
@@ -763,12 +774,14 @@ class CrateDigSession:
         probe["page"] = "1"
         data = self._request("/database/search", probe)
         pagination = data.get("pagination", {})
-        pages = pagination.get("pages", 0)
-        pages = min(pages, 10000)
+        items = pagination.get("items", 0)
+        per_page = int(params.get("per_page", "5"))
+        pages = (items + per_page - 1) // per_page if items > 0 else 0
+        pages = min(pages, 5000)
         self.pool_size_cache[key] = pages
         return pages
 
-    def get_random_releases(self, count: int = 10) -> list:
+    def get_random_releases(self, count: int = 5) -> list:
         import random
         params = self._build_search_params()
         pool_size = self._get_pool_size(params)
@@ -777,7 +790,7 @@ class CrateDigSession:
 
         found = []
         attempts = 0
-        max_attempts = count * 4
+        max_attempts = count * 3
 
         while len(found) < count and attempts < max_attempts:
             attempts += 1
@@ -929,11 +942,11 @@ def cratedig_search(session: CrateDigSession, count_text: str) -> None:
     try:
         count = int(count_text)
     except Exception:
-        count = 10
+        count = 3
     if count < 1:
         count = 1
-    if count > 20:
-        count = 20
+    if count > 5:
+        count = 5
 
     releases = session.get_random_releases(count)
 
