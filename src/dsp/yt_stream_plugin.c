@@ -93,6 +93,7 @@ typedef struct {
     bool paused;
     size_t played_samples;
     size_t seek_discard_samples;
+    double resume_offset_sec;  /* seek position for stream reconnect */
     int play_pause_step;
     int rewind_15_step;
     int forward_15_step;
@@ -772,6 +773,7 @@ static void restart_stream_from_beginning(yt_instance_t *inst, size_t discard_sa
     inst->paused = false;
     inst->played_samples = 0;
     inst->seek_discard_samples = discard_samples;
+    inst->resume_offset_sec = 0.0;
     inst->active_stream_resolved = false;
     inst->resolved_fallback_attempted = false;
 }
@@ -908,16 +910,28 @@ static int start_stream_legacy(yt_instance_t *inst) {
         extractor_args = "";
     }
 
-    snprintf(cmd, sizeof(cmd),
-        "exec \"%s/bin/yt-dlp\" --no-playlist "
-        "%s"
-        "-f \"%s\" -o - \"%s\" 2>/dev/null | "
-        "\"%s/bin/ffmpeg\" -hide_banner -loglevel error "
-        "-probesize 128k -analyzeduration 0 "
-        "-i pipe:0 -vn -sn -dn "
-        "-af \"aresample=%d\" "
-        "-f s16le -ac 2 -ar %d pipe:1",
-        inst->module_dir, extractor_args, legacy_fmt, inst->stream_url, inst->module_dir, MOVE_SAMPLE_RATE, MOVE_SAMPLE_RATE);
+    {
+        char ss_flag[64];
+        ss_flag[0] = '\0';
+        if (inst->resume_offset_sec > 1.0) {
+            snprintf(ss_flag, sizeof(ss_flag), "-ss %.1f ", inst->resume_offset_sec);
+            yt_log("resuming legacy stream with seek offset");
+        }
+        inst->resume_offset_sec = 0.0;
+
+        snprintf(cmd, sizeof(cmd),
+            "exec \"%s/bin/yt-dlp\" --no-playlist "
+            "%s"
+            "-f \"%s\" -o - \"%s\" 2>/dev/null | "
+            "\"%s/bin/ffmpeg\" -hide_banner -loglevel error "
+            "%s"
+            "-probesize 128k -analyzeduration 0 "
+            "-i pipe:0 -vn -sn -dn "
+            "-af \"aresample=%d\" "
+            "-f s16le -ac 2 -ar %d pipe:1",
+            inst->module_dir, extractor_args, legacy_fmt, inst->stream_url,
+            inst->module_dir, ss_flag, MOVE_SAMPLE_RATE, MOVE_SAMPLE_RATE);
+    }
 
     if (spawn_stream_command(inst, cmd, "failed to launch yt-dlp/ffmpeg pipeline") != 0) {
         set_error(inst, "failed to launch yt-dlp/ffmpeg pipeline");
@@ -963,20 +977,31 @@ static int start_stream_resolved(yt_instance_t *inst, const char *media_url) {
     }
     pthread_mutex_unlock(&inst->resolve_mutex);
 
-    snprintf(cmd,
-             sizeof(cmd),
-             "exec \"%s/bin/ffmpeg\" -hide_banner -loglevel warning "
-             "%s%s"
-             "-probesize 128k -analyzeduration 0 "
-             "-i \"%s\" -vn -sn -dn "
-             "-af \"aresample=%d\" "
-             "-f s16le -ac 2 -ar %d pipe:1 2>/dev/null",
-             inst->module_dir,
-             ua_flag,
-             ref_flag,
-             clean_url,
-             MOVE_SAMPLE_RATE,
-             MOVE_SAMPLE_RATE);
+    {
+        char ss_flag[64];
+        ss_flag[0] = '\0';
+        if (inst->resume_offset_sec > 1.0) {
+            snprintf(ss_flag, sizeof(ss_flag), "-ss %.1f ", inst->resume_offset_sec);
+            yt_log("resuming resolved stream with seek offset");
+        }
+        inst->resume_offset_sec = 0.0;
+
+        snprintf(cmd,
+                 sizeof(cmd),
+                 "exec \"%s/bin/ffmpeg\" -hide_banner -loglevel warning "
+                 "%s%s%s"
+                 "-probesize 128k -analyzeduration 0 "
+                 "-i \"%s\" -vn -sn -dn "
+                 "-af \"aresample=%d\" "
+                 "-f s16le -ac 2 -ar %d pipe:1 2>/dev/null",
+                 inst->module_dir,
+                 ss_flag,
+                 ua_flag,
+                 ref_flag,
+                 clean_url,
+                 MOVE_SAMPLE_RATE,
+                 MOVE_SAMPLE_RATE);
+    }
 
     if (spawn_stream_command(inst, cmd, "failed to launch ffmpeg pipeline") != 0) {
         set_error(inst, "failed to launch ffmpeg pipeline");
@@ -1872,6 +1897,8 @@ static void pump_pipe(yt_instance_t *inst) {
             if (inst->active_stream_resolved &&
                 !inst->resolved_fallback_attempted &&
                 supports_legacy_fallback(inst)) {
+                /* Save playback position before clearing so fallback can seek */
+                inst->resume_offset_sec = (double)inst->played_samples / (double)(MOVE_SAMPLE_RATE * 2);
                 pthread_mutex_lock(&inst->resolve_mutex);
                 inst->resolve_ready = false;
                 inst->resolve_failed = true;
@@ -1896,6 +1923,8 @@ static void pump_pipe(yt_instance_t *inst) {
         if (inst->active_stream_resolved &&
             !inst->resolved_fallback_attempted &&
             supports_legacy_fallback(inst)) {
+            /* Save playback position before clearing so fallback can seek */
+            inst->resume_offset_sec = (double)inst->played_samples / (double)(MOVE_SAMPLE_RATE * 2);
             pthread_mutex_lock(&inst->resolve_mutex);
             inst->resolve_ready = false;
             inst->resolve_failed = true;

@@ -727,13 +727,13 @@ class CrateDigSession:
         if self.token:
             headers["Authorization"] = f"Discogs token={self.token}"
         req = urllib.request.Request(url, headers=headers)
-        for attempt in range(3):
+        for attempt in range(2):
             try:
-                with urllib.request.urlopen(req, timeout=20) as resp:
+                with urllib.request.urlopen(req, timeout=10) as resp:
                     return json.loads(resp.read().decode("utf-8", errors="replace"))
             except urllib.error.HTTPError as exc:
-                if exc.code == 429 and attempt < 2:
-                    time.sleep(2 * (attempt + 1))
+                if exc.code == 429 and attempt < 1:
+                    time.sleep(3)
                     continue
                 raise
 
@@ -758,7 +758,7 @@ class CrateDigSession:
             self.pool_size_cache = {}
 
     def _build_search_params(self) -> dict:
-        params = {"type": "release", "per_page": "5"}
+        params = {"type": "release", "per_page": "100"}
         if self.filter_genre:
             params["genre"] = self.filter_genre
         if self.filter_style:
@@ -777,99 +777,122 @@ class CrateDigSession:
     def _cache_key(self) -> str:
         return f"{self.filter_genre}|{self.filter_style}|{self.filter_decade}|{self.filter_country}"
 
-    def _get_pool_size(self, params: dict) -> int:
+    def _get_pool_size_and_first_page(self, params: dict):
+        """Returns (pool_pages, first_page_results, first_page_number).
+        Caches pool size; first page data is only returned on cache miss."""
         key = self._cache_key()
         if key in self.pool_size_cache:
-            return self.pool_size_cache[key]
+            return self.pool_size_cache[key], None, None
+        import random
+        page = random.randint(1, 100)  # pick a random page (may overshoot, handled below)
         probe = dict(params)
-        probe["per_page"] = "1"
-        probe["page"] = "1"
+        probe["page"] = str(page)
         data = self._request("/database/search", probe)
         pagination = data.get("pagination", {})
-        items = pagination.get("items", 0)
-        per_page = int(params.get("per_page", "5"))
-        pages = (items + per_page - 1) // per_page if items > 0 else 0
-        pages = min(pages, 5000)
+        pages = pagination.get("pages", 0)
         self.pool_size_cache[key] = pages
-        return pages
+        if page > pages:
+            # Overshot — retry with valid page
+            page = random.randint(1, pages) if pages > 0 else 1
+            probe["page"] = str(page)
+            data = self._request("/database/search", probe)
+        return pages, data.get("results", []), page
 
     def get_random_releases(self, count: int = 5) -> list:
         import random
         params = self._build_search_params()
-        pool_size = self._get_pool_size(params)
+        pool_size, first_results, first_page = self._get_pool_size_and_first_page(params)
         if pool_size == 0:
             return []
 
         found = []
-        attempts = 0
-        max_attempts = count * 3
+        seen_pages = set()
+        release_lookups = 0
+        max_page_fetches = 3   # 100 entries/page, 3 pages = 300 candidates
+        max_release_lookups = count * 4  # cap individual release API calls
 
-        while len(found) < count and attempts < max_attempts:
-            attempts += 1
-            page = random.randint(1, pool_size)
-            params["page"] = str(page)
-            params["per_page"] = "5"
+        # Use first page from pool probe if available (saves 1 API call)
+        pages_data = []
+        if first_results and first_page is not None:
+            pages_data.append((first_page, first_results))
+            seen_pages.add(first_page)
 
-            try:
-                data = self._request("/database/search", params)
-            except Exception:
-                continue
-
-            results = data.get("results", [])
-            if not results:
-                continue
-
-            entry = results[random.randint(0, len(results) - 1)]
-            release_id = entry.get("id")
-            if not release_id or release_id in self.exclude_ids:
-                continue
-
-            try:
-                release = self._request(f"/releases/{release_id}")
-            except Exception:
-                continue
-
-            videos = release.get("videos", [])
-            if not videos:
-                continue
-
-            video = videos[random.randint(0, len(videos) - 1)]
-            video_url = video.get("uri", "")
-            if not video_url or "youtube.com" not in video_url:
-                youtube_videos = [v for v in videos if "youtube.com" in (v.get("uri") or "")]
-                if not youtube_videos:
+        while len(found) < count and len(seen_pages) < max_page_fetches and release_lookups < max_release_lookups:
+            if not pages_data:
+                page = random.randint(1, pool_size)
+                if page in seen_pages:
                     continue
-                video = youtube_videos[random.randint(0, len(youtube_videos) - 1)]
+                seen_pages.add(page)
+                params["page"] = str(page)
+
+                try:
+                    data = self._request("/database/search", params)
+                except Exception:
+                    continue
+
+                results = data.get("results", [])
+                if not results:
+                    continue
+            else:
+                page, results = pages_data.pop(0)
+
+            # Shuffle and try entries on this page
+            random.shuffle(results)
+            for entry in results:
+                if len(found) >= count or release_lookups >= max_release_lookups:
+                    break
+                release_id = entry.get("id")
+                if not release_id or release_id in self.exclude_ids:
+                    continue
+
+                release_lookups += 1
+                try:
+                    release = self._request(f"/releases/{release_id}")
+                except Exception:
+                    continue
+
+                videos = release.get("videos", [])
+                if not videos:
+                    continue
+
+                video = videos[random.randint(0, len(videos) - 1)]
                 video_url = video.get("uri", "")
+                if not video_url or "youtube.com" not in video_url:
+                    youtube_videos = [v for v in videos if "youtube.com" in (v.get("uri") or "")]
+                    if not youtube_videos:
+                        continue
+                    video = youtube_videos[random.randint(0, len(youtube_videos) - 1)]
+                    video_url = video.get("uri", "")
 
-            artists = release.get("artists", [])
-            artist_name = artists[0].get("name", "") if artists else ""
-            title = release.get("title", "")
-            year = str(release.get("year") or "")
-            country = release.get("country") or ""
-            genres = release.get("genres") or []
-            styles = release.get("styles") or []
-            genre_str = ", ".join(genres) if isinstance(genres, list) else ""
-            style_str = ", ".join(styles) if isinstance(styles, list) else ""
-            video_title = video.get("title", f"{artist_name} - {title}")
-            video_duration = video.get("duration")
+                artists = release.get("artists", [])
+                artist_name = artists[0].get("name", "") if artists else ""
+                title = release.get("title", "")
+                year = str(release.get("year") or "")
+                country = release.get("country") or ""
+                genres = release.get("genres") or []
+                styles = release.get("styles") or []
+                genre_str = ", ".join(genres) if isinstance(genres, list) else ""
+                style_str = ", ".join(styles) if isinstance(styles, list) else ""
+                video_title = video.get("title", f"{artist_name} - {title}")
+                video_duration = video.get("duration")
 
-            self.exclude_ids.append(release_id)
-            if len(self.exclude_ids) > self.MAX_EXCLUDE_IDS:
-                self.exclude_ids = self.exclude_ids[-self.MAX_EXCLUDE_IDS:]
+                self.exclude_ids.append(release_id)
+                if len(self.exclude_ids) > self.MAX_EXCLUDE_IDS:
+                    self.exclude_ids = self.exclude_ids[-self.MAX_EXCLUDE_IDS:]
 
-            found.append({
-                "id": str(release_id),
-                "title": video_title,
-                "channel": artist_name,
-                "duration": video_duration,
-                "url": video_url,
-                "genre": genre_str,
-                "style": style_str,
-                "country": country,
-                "year": year,
-            })
+                found.append({
+                    "id": str(release_id),
+                    "title": video_title,
+                    "channel": artist_name,
+                    "duration": video_duration,
+                    "url": video_url,
+                    "genre": genre_str,
+                    "style": style_str,
+                    "country": country,
+                    "year": year,
+                })
 
+        random.shuffle(found)
         return found
 
 
@@ -960,7 +983,15 @@ def cratedig_search(session: CrateDigSession, count_text: str) -> None:
     if count > 5:
         count = 5
 
-    releases = session.get_random_releases(count)
+    try:
+        releases = session.get_random_releases(count)
+    except urllib.error.URLError as exc:
+        reason = str(getattr(exc, "reason", exc))
+        write_fields("ERROR", f"network error: {reason}")
+        return
+    except Exception as exc:
+        write_fields("ERROR", f"search failed: {exc}")
+        return
 
     n = 0
     write_fields("SEARCH_BEGIN")

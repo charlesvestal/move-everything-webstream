@@ -1082,10 +1082,12 @@ function refreshState() {
       const errDetail = host_module_get_param('search_error') || '';
       if (errDetail.indexOf('429') >= 0) {
         statusMessage = 'Rate limited - wait 1min';
-      } else if (errDetail.indexOf('timeout') >= 0) {
-        statusMessage = 'Search timeout - retry';
+      } else if (errDetail.indexOf('timeout') >= 0 || errDetail.indexOf('timed out') >= 0) {
+        statusMessage = 'Timed out - try again';
+      } else if (errDetail.indexOf('network') >= 0 || errDetail.indexOf('urlopen') >= 0 || errDetail.indexOf('Errno') >= 0) {
+        statusMessage = 'No connection - check WiFi';
       } else {
-        statusMessage = 'Search failed';
+        statusMessage = 'Search failed - try again';
       }
     } else if (searchStatus === 'busy') {
       statusMessage = 'Search busy';
