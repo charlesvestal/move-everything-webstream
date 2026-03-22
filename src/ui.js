@@ -7,26 +7,26 @@ import {
   handleTextEntryMidi,
   drawTextEntry,
   tickTextEntry
-} from '/data/UserData/move-anything/shared/text_entry.mjs';
+} from '/data/UserData/schwung/shared/text_entry.mjs';
 
 import {
   MidiNoteOn,
   MoveShift,
   MoveKnob1, MoveKnob2, MoveKnob3, MoveKnob7, MoveKnob8,
   MoveKnob1Touch, MoveKnob2Touch, MoveKnob3Touch, MoveKnob7Touch, MoveKnob8Touch
-} from '/data/UserData/move-anything/shared/constants.mjs';
+} from '/data/UserData/schwung/shared/constants.mjs';
 
-import { isCapacitiveTouchMessage, decodeDelta } from '/data/UserData/move-anything/shared/input_filter.mjs';
+import { isCapacitiveTouchMessage, decodeDelta } from '/data/UserData/schwung/shared/input_filter.mjs';
 
-import { createAction } from '/data/UserData/move-anything/shared/menu_items.mjs';
-import { createMenuState, handleMenuInput } from '/data/UserData/move-anything/shared/menu_nav.mjs';
-import { createMenuStack } from '/data/UserData/move-anything/shared/menu_stack.mjs';
-import { drawStackMenu } from '/data/UserData/move-anything/shared/menu_render.mjs';
+import { createAction } from '/data/UserData/schwung/shared/menu_items.mjs';
+import { createMenuState, handleMenuInput } from '/data/UserData/schwung/shared/menu_nav.mjs';
+import { createMenuStack } from '/data/UserData/schwung/shared/menu_stack.mjs';
+import { drawStackMenu } from '/data/UserData/schwung/shared/menu_render.mjs';
 
 const MAX_MENU_RESULTS = 20;
 const MAX_SEARCH_HISTORY = 20;
-const SEARCH_HISTORY_PATH = '/data/UserData/move-anything/config/webstream_search_history.json';
-const CRATEDIG_FILTER_PATH = '/data/UserData/move-anything/config/webstream_cratedig_filter.json';
+const SEARCH_HISTORY_PATH = '/data/UserData/schwung/config/webstream_search_history.json';
+const CRATEDIG_FILTER_PATH = '/data/UserData/schwung/config/webstream_cratedig_filter.json';
 const LEGACY_SEARCH_HISTORY_PATH = '/data/UserData/move-anything/webstream_search_history.json';
 const LEGACY_SEARCH_HISTORY_PATH_2 = '/data/UserData/move-anything/yt_search_history.json';
 const SPINNER = ['-', '/', '|', '\\'];
@@ -1253,6 +1253,12 @@ globalThis.onMidiMessageInternal = function (data) {
   const cc = data[1];
   const val = data[2];
 
+  /* Text entry must be checked first — it handles pad notes (0x90) and CCs */
+  if (isTextEntryActive()) {
+    handleTextEntryMidi(data);
+    return;
+  }
+
   if (status === MidiNoteOn && val > 0) {
     if (cc === MoveKnob1Touch) {
       setPendingKnobAction(MoveKnob1, 'play_pause', streamStatus === 'paused' ? 'Resume?' : 'Pause?');
@@ -1296,11 +1302,6 @@ globalThis.onMidiMessageInternal = function (data) {
 
   if (cc === MoveShift) {
     shiftHeld = val > 0;
-    return;
-  }
-
-  if (isTextEntryActive()) {
-    handleTextEntryMidi(data);
     return;
   }
 
