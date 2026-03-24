@@ -313,7 +313,7 @@ def freesound_api_key(config: dict) -> str:
 
 
 def http_json(url: str, timeout: int = 20):
-    req = urllib.request.Request(url, headers={"User-Agent": "move-anything-webstream/1.0"})
+    req = urllib.request.Request(url, headers={"User-Agent": "schwung-webstream/1.0"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = resp.read()
@@ -628,7 +628,7 @@ class SampletteSession:
 
     def _request(self, path: str, data=None, method="GET"):
         url = f"{self.SAMPLETTE_BASE}{path}"
-        headers = {"User-Agent": "move-anything-webstream/1.0"}
+        headers = {"User-Agent": "schwung-webstream/1.0"}
         body = None
         if data is not None:
             body = json.dumps(data).encode("utf-8")
@@ -707,7 +707,7 @@ class SampletteSession:
 class CrateDigSession:
     DISCOGS_BASE = "https://api.discogs.com"
     MAX_EXCLUDE_IDS = 200
-    USER_AGENT = "MoveAnythingWebstream/1.0 +https://github.com/charlesvestal/move-anything-webstream"
+    USER_AGENT = "SchwungWebstream/1.0 +https://github.com/charlesvestal/schwung-webstream"
 
     def __init__(self, token: str = ""):
         self.token = token
