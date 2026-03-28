@@ -743,6 +743,18 @@ function playResult(r) {
     meta.appendChild(link);
   }
 
+  if (r.videoId) {
+    const stemsLink = document.createElement('a');
+    stemsLink.href = `stems.html?v=${r.videoId}`;
+    stemsLink.target = '_blank';
+    stemsLink.rel = 'noopener';
+    stemsLink.className = 'tag';
+    stemsLink.innerHTML = '<span class="tag-label">Stems</span>Separate';
+    stemsLink.style.textDecoration = 'none';
+    stemsLink.style.color = 'inherit';
+    meta.appendChild(stemsLink);
+  }
+
   updateHistory();
 }
 
